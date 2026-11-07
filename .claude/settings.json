@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rustc --version)",
+      "Bash(cargo --version)",
+      "Bash(node --version)",
+      "Bash(npm --version)",
+      "Bash(pnpm --version)",
+      "Bash(python --version)",
+      "Bash(ffmpeg -version)",
+      "Bash(ffmpeg -hide_banner -encoders)",
+      "Bash(ffmpeg -hide_banner -hwaccels)",
+      "Bash(ffprobe -version)",
+      "Bash(winget install -e --id Rustlang.Rustup)",
+      "Bash(winget install -e --id Gyan.FFmpeg)",
+      "PowerShell(winget install -e --id Rustlang.Rustup)",
+      "PowerShell(winget install -e --id Gyan.FFmpeg)"
+    ],
+    "deny": [
+      "Bash(winget upgrade:*)",
+      "Bash(choco install:*)",
+      "Bash(scoop install:*)",
+      "Bash(pip install:*)",
+      "Bash(python -m pip install:*)",
+      "Bash(uv pip install:*)",
+      "Bash(npm install -g:*)",
+      "Bash(cargo install:*)",
+      "Bash(rustup install:*)",
+      "Bash(setx:*)",
+      "Bash(reg add:*)",
+      "Bash(reg delete:*)",
+      "PowerShell(winget upgrade:*)",
+      "PowerShell(choco install:*)",
+      "PowerShell(pip install:*)",
+      "PowerShell(setx:*)",
+      "PowerShell(Install-Module:*)",
+      "PowerShell(Install-Package:*)",
+      "PowerShell(Set-ItemProperty:*)",
+      "PowerShell(Start-Process * -Verb RunAs:*)"
+    ]
+  }
+}

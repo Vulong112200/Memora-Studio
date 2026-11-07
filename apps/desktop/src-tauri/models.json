@@ -1,0 +1,47 @@
+[
+  {
+    "id": "openclip-vit-b32",
+    "name": "OpenCLIP ViT-B/32",
+    "version": "1",
+    "category": "vision",
+    "description": "Visual concepts and text search over scene frames (beach, food, city, people …).",
+    "required": false,
+    "license": "Not verified yet (model proposal pending)",
+    "minimumRamGb": 8,
+    "validation": "openvino-ir",
+    "artifacts": [
+      { "file": "openclip_image.xml", "url": null, "revision": null, "sha256": null, "sizeBytes": null },
+      { "file": "openclip_image.bin", "url": null, "revision": null, "sha256": null, "sizeBytes": null }
+    ],
+    "runtimes": [{ "runtime": "openvino", "devices": ["CPU", "GPU"], "validated": false }],
+    "notes": "Exported at development time from the official checkpoint (ADR 0001). Download stays disabled until the model proposal (source, revision, license, checksum) is approved."
+  },
+  {
+    "id": "whisper-base",
+    "name": "Whisper base (multilingual)",
+    "version": "1",
+    "category": "speech",
+    "description": "Speech transcription for Vietnamese and English (default speech model).",
+    "required": false,
+    "license": "Not verified yet (model proposal pending)",
+    "minimumRamGb": 4,
+    "validation": "none",
+    "artifacts": [{ "file": "ggml-base.bin", "url": null, "revision": null, "sha256": null, "sizeBytes": null }],
+    "runtimes": [{ "runtime": "whisper.cpp", "devices": ["CPU"], "validated": false }],
+    "notes": "Runs in whisper.cpp as a separate native process (ADR 0001). Load validation is added together with the whisper.cpp runtime."
+  },
+  {
+    "id": "whisper-small",
+    "name": "Whisper small (multilingual)",
+    "version": "1",
+    "category": "speech",
+    "description": "Better transcription quality; optional, larger and slower than base.",
+    "required": false,
+    "license": "Not verified yet (model proposal pending)",
+    "minimumRamGb": 8,
+    "validation": "none",
+    "artifacts": [{ "file": "ggml-small.bin", "url": null, "revision": null, "sha256": null, "sizeBytes": null }],
+    "runtimes": [{ "runtime": "whisper.cpp", "devices": ["CPU"], "validated": false }],
+    "notes": "Download on demand only (docs/Production.md §3.3)."
+  }
+]
