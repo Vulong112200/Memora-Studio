@@ -106,7 +106,27 @@ Rule going forward: **code > manifests (`models.json`, `sounds.json`) > ADRs > P
 
 ## Status (2026-11-08)
 
-Owner approved batches 1–5. **Done:** R6, R3, R4, R5, R2 (details and tests in [PROGRESS.md](PROGRESS.md)). E2 (same-day order by recording time) was done with the owner's plan-variety feedback, together with a per-concept scene cap and a 35 % concept share. Everything else is still open.
+Owner approved batches 1–5. **Done:** R6, R3, R4, R5, R2 (details and tests in [PROGRESS.md](PROGRESS.md)). E2 (same-day order by recording time) was done with the owner's plan-variety feedback, together with a per-concept scene cap and a 35 % concept share.
+
+Done on later owner requests (not audit items): `memora-cli` command-line tool, editing `Wishes` (prefer / less / avoid concepts, length, look, music, text) and the offline request box in Smart edit (owner chose keywords over a Claude API call). U2 is partly covered: plans now report windows left out by avoided concepts.
+
+**Still open:** R1 relink, E1 favourite guarantee (owner decision), E3, E4 per-join transitions, E5 tests, M1 HDR, M2 A/V check, M3 manual crop, M4 encoder report, A1–A4, V1 versions, U1/U3, docs items in section D (APP_OVERVIEW refreshed 2026-11-08).
+
+## Found while writing docs/system (2026-11-08, not fixed)
+
+| ID | Area | Finding | Evidence |
+|---|---|---|---|
+| N1 | Data | Re-importing a changed file (size/mtime) clears scenes/tags/transcript but keeps `project_clips` and `media_marks`; clip In/Out are not re-checked against the new duration | `media.rs` re-import path, DATABASE.md §invalidation |
+| N2 | Editing | Media ids inside `editing_plans.plan_json` are not foreign keys: applying a plan that names removed media fails ("Media N not found") and rolls back | `editing::apply` |
+| N3 | Cache | Re-analysis with fewer scenes leaves old `cache\frames\<id>\<idx>.jpg` files | `analysis::store` |
+| N4 | CLI | `memora-cli` never initialises logging (module log events are lost); "close the app first" is not enforced | `cli.rs` |
+| N5 | Timeline | `timeline::set_caption` does not update `projects.updated_at`; `set_range` has no Tauri command (CLI only) | `timeline.rs`, `lib.rs` |
+| N6 | Settings | `settings.json` is written directly, not via `.part` + rename | `settings::save` |
+| N7 | UI | Export progress shows "Rendering…" during the library-music download (0–50 of 1000) | `Timeline.tsx`, `export.rs` |
+| N8 | UI | Smart edit "last 1/6/12 months" use `toISOString()` (UTC): dates can be off by one day early in the morning in UTC+7 | `EditingPlan.tsx` `range()` |
+| N9 | Worker | Dev fallback worker path is fixed at compile time (`CARGO_MANIFEST_DIR`); ADR 0002 says `runtime\ai-worker\<version>\`, code uses `runtime\ai-worker\python|app` | `worker::resolve`, ADR 0002 |
+| N10 | Docs/code comments | `editing.rs` `NO_MUSIC`/`NO_TITLES`, `transcribe.rs` VAD comment, `timeline.rs` "will produce", `models.rs` state list without `update_available` are stale | see BACKEND.md notes |
+| N11 | Data | `media.probe_json` is stored but never read; `media_analysis.version/quality` never read (see V1) | DATABASE.md |
 
 ## E. Approval gate
 The owner chooses which items to implement, by ID or by batch number. Recommended first batch: **1–5 (R6, R3, R4, R5, R2)**. All are small, P0, and need no schema migration. No code is touched before that answer.

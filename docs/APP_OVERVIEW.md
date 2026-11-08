@@ -1,7 +1,7 @@
 # Memora Studio — Application Overview
 
-Snapshot of the app as built, **2026-11-08**, commit `5f6bb1a` on `main`.
-One-file reference for setup, stack, AI models, processing logic and UI. Facts come from the code and the documents below. Measured numbers are quoted as written in the source documents. Anything that is an assumption is labelled as such.
+Snapshot of the app as built, **2026-11-08**, commit `b751673` on `main` (first written at `5f6bb1a`, refreshed after the music library, reliability batch, plan variety, command-line tool and request box).
+One-file reference for setup, stack, AI models, processing logic and UI. **Code-level details** (every module, component, table, worker job and flow) are in [system/README.md](system/README.md); this file is the summary. Facts come from the code and the documents below. Measured numbers are quoted as written in the source documents. Anything that is an assumption is labelled as such.
 
 | Source | Role |
 |---|---|
@@ -12,7 +12,8 @@ One-file reference for setup, stack, AI models, processing logic and UI. Facts c
 | [HARDWARE_VALIDATION.md](HARDWARE_VALIDATION.md) | Phase 1b / Phase 3 measurements |
 | [MODEL_PROPOSAL.md](MODEL_PROPOSAL.md) | Model sources, licences, checksums, measurements |
 | [PROGRESS.md](PROGRESS.md) | Day log, open items |
-| [adr/](adr/) | ADR 0001–0004 |
+| [IMPROVEMENT_AUDIT.md](IMPROVEMENT_AUDIT.md) | Audit of the improvement backlog, findings and their status |
+| [adr/](adr/) | ADR 0001–0005 |
 
 ---
 
@@ -27,6 +28,9 @@ One-file reference for setup, stack, AI models, processing logic and UI. Facts c
 | 4 Classical analysis (scenes, quality, shake, duplicates) | Done |
 | 5 Local AI (Model Manager, transcription, OpenCLIP tagging, Silero VAD) | Done, awaiting review |
 | 6 Editing Core (smart edit, styles, crossfades, recaps, titles, music) | Done, owner review round 1 done, awaiting review |
+| Free music library (ADR 0005) | Done |
+| Reliability batch (audit R2–R6) | Done |
+| Plan variety, editing wishes, request box, `memora-cli` | Done |
 | 7 Product completion (packaging, installer, …) | **Not approved yet** |
 
 Still forbidden without separate approval: downloading models beyond the approved proposal, installing torch outside the dev export venv, driver / env var / Windows-settings changes, admin commands, scanning personal folders, uploading media.
@@ -128,6 +132,8 @@ Key pins: `torch==2.15.0`, `torchvision==0.29.2`, `open_clip_torch==4.2.1`, `ope
 |---|---|
 | `apps/desktop/` | The app: React frontend `src/`, Rust backend `src-tauri/` |
 | `apps/desktop/src-tauri/models.json` | Model manifests (embedded at build time) |
+| `apps/desktop/src-tauri/sounds.json` | Free music library catalog (22 verified CC BY 4.0 tracks, ADR 0005) |
+| `apps/desktop/src-tauri/src/bin/memora-cli.rs` | Command-line tool (thin wrapper over `src/cli.rs`) |
 | `workers/ai-worker/` | Production Python worker: `memora_worker.py`, `analysis.py`, `tagging.py` |
 | `tools/clip-export/` | Dev-time OpenCLIP → OpenVINO IR exporter |
 | `spikes/` | Throwaway Phase 1b spikes (protocol, QSV, OpenVINO devices, orchestrator, packaging, Tauri smoke) |
@@ -150,6 +156,7 @@ Key pins: `torch==2.15.0`, `torchvision==0.29.2`, `open_clip_torch==4.2.1`, `ope
 ```
 <data root>\
   database\memora.db                    SQLite (WAL)
+  database\backups\memora-*.db          verified copies: start-up (if none < 10 min old), before migrations, "Back up now"; last 10 kept
   logs\memora.log.YYYY-MM-DD            daily JSON-lines logs
   runtime\ffmpeg\                       optional bundled ffmpeg/ffprobe
   runtime\whisper.cpp\b5454\            whisper-cli.exe, whisper.dll, ggml*.dll
@@ -161,7 +168,9 @@ Key pins: `torch==2.15.0`, `torchvision==0.29.2`, `open_clip_torch==4.2.1`, `ope
   cache\frames\<id>\<i>.jpg             scene representative frames
   cache\audio\<id>.wav                  temporary 16 kHz audio for whisper
   cache\render\titles-*.ass             temporary subtitle/title files
-  projects\<id>\exports\*.mp4           final exports
+  cache\downloads\sounds\               library music, downloaded for one export then deleted
+  projects\<id>\exports\*.mp4           final exports (never overwritten: -2, -3 …; failed validation → *-failed-validation.mp4)
+  projects\<id>\exports\*.unvalidated.mp4  render in progress (renamed only after validation)
   test-media\                           user + synthetic samples (dev)
 ```
 
@@ -194,10 +203,10 @@ Key pins: `torch==2.15.0`, `torchvision==0.29.2`, `open_clip_torch==4.2.1`, `ope
 ## 7. Architecture
 
 ```
-React UI (WebView2)
-   │ invoke() typed wrappers in src/api.ts           ▲ "job-updated" event
-   ▼                                                  │
-Tauri commands (lib.rs, 29 commands) ──► JobManager (jobs.rs)
+React UI (WebView2)                 memora-cli.exe (cli.rs, text output)
+   │ invoke() wrappers (api.ts)        │ same functions, runs one job at a time itself
+   ▼                     ▲ "job-updated"▼
+Tauri commands (lib.rs, 33 commands) ──► JobManager (jobs.rs) ──► lib::job_runner (shared with the CLI)
                                           FIFO, ONE job at a time, in memory
                                           │
           ┌───────────────────────────────┼─────────────────────────────┐
@@ -216,15 +225,18 @@ SQLite (db.rs) ◄── media, analysis, transcripts, tags, plans, timeline, mo
 
 | Module | Responsibility |
 |---|---|
-| `main.rs` / `lib.rs` | Entry, `AppState`, command registration, job routing |
+| `main.rs` / `lib.rs` | Entry, `AppState`, commands, `job_runner` (job routing, shared with the CLI), `make_plan`, `apply_plan_to`, `recommend_for`, `vocabulary`, start-up `reconcile` |
+| `cli.rs` + `bin/memora-cli.rs` | Command-line tool: the engine without the window (section 15) |
+| `request.rs` | Request box: offline keyword reader for a Vietnamese/English sentence (section 15) |
+| `sounds.rs` | Free music library: catalog, recommendations, download-verify-delete on export |
 | `settings.rs` | settings.json, data root preparation |
 | `logging.rs` | tracing setup |
 | `hardware.rs` | Registry (OS, CPU), `GlobalMemoryStatusEx`, DXGI GPUs, disk free space |
-| `db.rs` | SQLite open, WAL, migrations |
+| `db.rs` | SQLite open, WAL, migrations, verified backups (`VACUUM INTO` + `integrity_check`) |
 | `projects.rs` | Project CRUD (name 1–200 chars) |
-| `process.rs` | Job Object + CREATE_NO_WINDOW command builder |
-| `jobs.rs` | Job queue, progress, cancellation |
-| `worker.rs` | Python worker spawn, handshake, restart |
+| `process.rs` | Job Object + CREATE_NO_WINDOW; `spawn` (kills a child that cannot join the Job Object), `wait_output` (timeout + cancel) |
+| `jobs.rs` | Job queue, progress, cancellation, `busy()` |
+| `worker.rs` | Python worker spawn, handshake, restart; killed 10 s after an ignored cancel |
 | `media.rs` | ffprobe, library, job `media.import` |
 | `proxy.rs` | Thumbnails, proxies, FFmpeg helpers, job `media.proxy` |
 | `analysis.rs` | Scene/sample storage, job `media.analyze` |
@@ -238,7 +250,14 @@ SQLite (db.rs) ◄── media, analysis, transcripts, tags, plans, timeline, mo
 
 ### 7.2 Tauri commands
 
-`get_settings, set_data_root, get_hardware_info, list_projects, create_project, rename_project, delete_project, list_media, remove_media, list_scenes, get_transcript, set_media_mark, list_styles, generate_plan, get_plan, apply_plan, list_models, remove_model, list_clips, add_clip, remove_clip, set_clip_caption, get_export_options, set_export_options, move_clip, submit_job, list_jobs, cancel_job, get_worker_info`
+`get_settings, set_data_root, backup_database, get_hardware_info, list_projects, create_project, rename_project, delete_project, list_media, remove_media, list_scenes, get_transcript, set_media_mark, list_styles, generate_plan (with optional request sentence), interpret_request, get_plan, apply_plan, list_models, remove_model, list_clips, add_clip, remove_clip, list_sounds, recommend_sounds, set_clip_caption, get_export_options, set_export_options, move_clip, submit_job, list_jobs, cancel_job, get_worker_info`
+
+`set_data_root` is refused while a job is queued or running; the new database is opened before settings are saved.
+
+### 7.4 Crash safety
+
+- At start-up (and on a data-folder switch, when no job runs): model rows stuck in `downloading/verifying/installing/validating` become `install_failed` "Interrupted…"; app temporaries are removed (`cache\render|audio|downloads\sounds`, `.part`, `.level.mp4`, `.unvalidated.mp4`). Resumable model downloads are kept.
+- Timeouts (assumed values, not measured): ffprobe 60 s, loudness measurement 600 s, worker cancel grace 10 s.
 
 ### 7.3 Job system
 
@@ -402,17 +421,35 @@ Deterministic, with no LLM. Inputs: scenes + scores, tags, transcripts, user mar
 3. **Sentence-safe cuts (`fit_speech`)**: an edge that falls inside speech is extended to the whole segment (clip ≤ 3×max, inside the scene), or shrunk to exclude it (clip ≥ min), or the window is dropped. At most 4 iterations.
 4. **Scores**: technical (samples in the window), semantic (0.5 if untagged; otherwise 0.5·top + 0.5·min(1, 2·favoured-concept score)), speech (fraction of the window covered by speech), favorite (0/1). Weighted by the style.
 5. **Bad-shot penalty**: rank × (1 − min(0.8, 2·Σ negative-tag scores)), i.e. up to −80 %.
-6. **Greedy selection** while total + min ≤ target. Overlaps in the same file and duplicate scenes are skipped. At most 1 + scene_ms/60,000 clips per scene. A second clip from the same scene needs dHash distance > 12 **or** a different dominant concept.
+6. **Greedy selection** while total + min ≤ target. Overlaps in the same file and duplicate scenes are skipped. Per scene, **per main concept**, at most 1 + scene_ms/60,000 clips (a walk up a path and the tree at its end, in one continuous shot, count separately). A second clip from the same scene needs dHash distance > 12 **or** a different dominant concept.
    Diversity multiplier = 0.85^(same concept) × 0.9^(same file) × 0.6^(same file within 3×ideal).
-7. **Story structure**: chronological order by (day, media, in), then the opening clip (style's `open_with`, score > 0.2, or the hook) moves first and the ending clip (`end_with`) moves last.
+   **Concept share**: while other content is available, one main concept fills at most `MAX_CONCEPT_SHARE` = 35 % of the target (initial value); it only fills up the rest when nothing else is left. Owner feedback 2026-11-08: a recap that was mostly cycling dropped the walk to the big tree.
+7. **Story structure**: chronological order by full recording time (then media, in), then the opening clip (style's `open_with`, score > 0.2, or the hook) moves first and the ending clip (`end_with`) moves last.
 8. **merge_near**: consecutive clips from one file ≤ 1.5 s apart are merged.
 9. **Suggested title**: most frequent Vietnamese main tag + date range, e.g. "Xe đạp · 20 – 27/02/2026".
 
-### 12.3 Apply
+### 12.3 Wishes (user requests on top of a style)
+
+`editing::Wishes`, stored in the plan JSON (`plan_with(style, sources, wishes)`):
+
+| Field | Effect |
+|---|---|
+| `prefer` | Concepts to show more of: rank × up to 1.5 (reason "wanted: …") |
+| `less` | Concepts to show less of: rank × down to 0.5 (reason "less wanted: …") |
+| `avoid` | Windows where an avoided concept scores ≥ 0.25 are left out (counted in `skipped`) |
+| `target_ms` | Length instead of the style's target |
+| `preset` | Export preset instead of the style's (reels → fill / centre crop) |
+| `color`, `title`, `ending`, `captions` | Applied to the export options on Apply |
+| `music` | `none` removes music; `low` / `medium` / `high` / `any` = best-suited library track of that energy, chosen for the applied timeline (`lib::apply_plan_to`) |
+| `request` | The sentence the wishes came from (request box) |
+
+Concept names match tag `en` or `vi`, case-insensitive.
+
+### 12.4 Apply
 
 - The user can reorder or drop clips in the UI (frontend only), then **Apply to timeline** replaces `project_clips` in one transaction.
-- Styled export options are saved too: fill = (preset is reels), the style's transition and colour, fade on, normalise on, speech captions per style, and the suggested title only if none is set. Existing music and texts are kept.
-- **Apply and export** also submits `media.export`.
+- Styled export options are saved too: fill = (plan preset is reels), the style's transition, colour (or the wished one), fade on, normalise on, speech captions per style (or wish), the wished title, or the suggested title only if none is set. Existing music and texts are kept unless a wish changes them.
+- **Apply and export** also submits `media.export` with the plan's preset.
 
 ## 13. Timeline and export
 
@@ -446,12 +483,12 @@ Renders from the **original files**. The job fails if the timeline is empty or a
 | Colour look | `none, warm, cool, vivid, cinematic, vintage, bw` (fixed filter strings) |
 | Fade | From/to black, 600 ms (≤ total/4), audio too |
 | Clip volume | 0–2 (UI 0–1.5) |
-| Music | User file (mp3, m4a, aac, wav, flac, ogg, opus), looped and trimmed, 1.5 s fade-out, volume (default 0.35), optional **ducking** (`sidechaincompress` under speech) |
-| Normalise | `loudnorm I=-16 TP=-1.5 LRA=11` |
+| Music | User file (mp3, m4a, aac, wav, flac, ogg, opus) **or a free library track** (downloaded for the export, SHA-256 checked, deleted afterwards, credit burned in at the end), looped and trimmed, 1.5 s fade-out, volume (default 0.35), optional **ducking** (`sidechaincompress` under the clips' sound) |
+| Normalise | `loudnorm I=-16 TP=-1.5 LRA=11` in the render, then a second pass: measure (ebur128) → exact gain (±12 dB) + limiter at −1 dBTP |
 | Text | Opening title + subtitle (0–4 s), per-clip captions (4 s labels), speech subtitles from transcripts, ending text (last 3.5 s). Burned in with ASS, Segoe UI Semibold. User text is neutralised (`\`→`/`, `{}`→`()`) |
 
 Duration = Σ clip lengths − (N−1)·transition.
-Output: `<data root>\projects\<id>\exports\<name>-<preset>-<unix>.mp4`, written as `.part` and renamed.
+Output: rendered to `<name>-<preset>-<unix>.unvalidated.mp4` (via `.part`), levelled, **validated, then renamed** to the first free name `<name>-<preset>-<unix>.mp4` (`-2`, `-3` … — an earlier export is never replaced). A file that fails validation is kept as `…-failed-validation.mp4`. Disk-full / permission errors are not retried with the second encoder.
 
 **Validation** (progress 900–1000 of 1000):
 - Checks: exists, size > 0; duration within ±(200 + 100·segments) ms; resolution = target and rotation 0; has audio; full decode with `-xerror`.
@@ -466,9 +503,9 @@ Output: `<data root>\projects\<id>\exports\<name>-<preset>-<unix>.mp4`, written 
 
 | Card (order) | File | Shown when | What it does |
 |---|---|---|---|
-| Data folder | `App.tsx` | settings loaded | First run: choose the data root (prefilled default). Shows the log folder, DB errors, "restart required" |
+| Data folder | `App.tsx` | settings loaded | First run: choose the data root (prefilled default). Shows the log folder, DB errors, "restart required"; "Back up now" + restore steps |
 | Projects | `Projects.tsx` | data root OK | Create / open / rename / delete (originals not affected) |
-| Smart edit · {project} | `EditingPlan.tsx` | project open | Style + date range → Generate plan. Clip list with T/S/V/★ scores, reasons, ↑/↓/Drop, restore. Apply, or Apply and export |
+| Smart edit · {project} | `EditingPlan.tsx` | project open | **Request box** ("Describe the video you want", live "Understood: …") + style + date range → Generate plan. Clip list with T/S/V/★ scores, reasons, ↑/↓/Drop, restore. Apply, or Apply and export |
 | Timeline · {project} | `Timeline.tsx` | project open | Ordered clips with thumbnail, caption, in→out, ↑/↓/Remove, total duration. Preset + **Look & sound** (Picture / Sound / Text) + Export, progress, validation report |
 | Media library | `MediaLibrary.tsx` | data root OK | Add videos, Analyze / Tag / Transcribe N videos (model select), search by name/tag (EN/VI), table (thumbnail, recorded, length, resolution, fps, codec, size, analysis, speech, concepts), ★ / ⊘ / Remove |
 | ↳ Preview | `MediaLibrary.tsx` | row selected | `<video>` of the **proxy** ("exports always use the original"). Set In / Set Out → "Add to {project}" |
@@ -480,7 +517,37 @@ Output: `<data root>\projects\<id>\exports\<name>-<preset>-<unix>.mp4`, written 
 
 All Tauri calls go through typed wrappers in `src/api.ts`.
 
-## 15. Measured performance (single runs, indicative, not benchmarks)
+## 15. Request box and command-line tool
+
+### 15.1 Request box (`request.rs`)
+
+Owner decision 2026-11-08: **offline keyword reading** — no language model, no network, no API key (a Claude API option was offered and declined for now). A Vietnamese or English sentence becomes a style, dates and `Wishes`; the UI reads back "Understood: …" before anything is made. Unknown words are ignored and the box says so.
+
+| Recognised | Examples |
+|---|---|
+| Length | `30 giây`, `1 phút 30 giây`, `45s`, `2 min` |
+| Frame | `dọc`, `reels`, `tiktok`, `9:16` (→ reels + social style unless another style is named) · `ngang`, `16:9` |
+| Concepts | `nhiều` / `thêm` (default) · `bớt` / `ít` / `less` · `bỏ` / `không` / `tránh` / `no` + any concept of the library's tag names (en or vi), per clause; `thiên nhiên` / `nature` = the landscape concepts |
+| Colour | `tông ấm`, `lạnh`, `rực rỡ`, `cổ điển`, `đen trắng` |
+| Music | `nhạc nhẹ`, `nhạc sôi động`, `nhạc vui`, `có nhạc`, `không nhạc` |
+| Text | `phụ đề` / `không phụ đề`, `tiêu đề: …` (or quoted), `kết thúc bằng: …` |
+| Dates | `tháng 2/2026`, `tháng 2 năm 2026`, `02/2026`, `năm 2025`, `từ 01/02/2026 đến 15/02/2026` |
+| Style | `điện ảnh`/`cinematic`, `hoài niệm`, `tài liệu`/`vlog`, `tối giản`, `sôi động` |
+
+Rules: needles with diacritics match exactly ("âm" ≠ "ấm"); without diacritics they also match accented text. Concept names without diacritics match only when unambiguous (several words or ≥ 5 letters: "thuyen" yes, "bien" no). Title/ending text is taken first so its words never become wishes; longer concept names win ("bãi biển" is beach, not also sea).
+
+### 15.2 Command-line tool (`memora-cli.exe`)
+
+Built next to the app (`target\release\memora-cli.exe`). Same data folder (`MEMORA_DATA_ROOT` overrides), database, Editing Core and export; results show up in the app. Short text output — the token-cheap way for an assistant to edit for the owner. Close the app before `export` / `job`.
+
+| Group | Commands |
+|---|---|
+| Library | `status`, `media`, `concepts`, `scenes MEDIA`, `transcript MEDIA`, `job KIND [JSON]` |
+| Plans | `styles`, `understand TEXT`, `plan P --request "…"`, `plan P --style ID [--from --to --target --prefer --less --avoid]`, `show-plan P`, `apply P [--keep 0,2,1]` |
+| Timeline | `timeline P`, `clip-add P MEDIA IN OUT`, `clip-trim CLIP IN OUT`, `clip-remove`, `clip-move CLIP ±1`, `clip-caption CLIP TEXT` (seconds) |
+| Output | `options P [--color --transition --transition-ms --fill --fade --normalize --volume --title --subtitle --ending --captions --music --music-library --music-volume --duck]`, `sounds [P]`, `export P [--preset]` |
+
+## 16. Measured performance (single runs, indicative, not benchmarks)
 
 Quoted from HARDWARE_VALIDATION, MODEL_PROPOSAL and ADR 0003.
 
@@ -500,29 +567,37 @@ Quoted from HARDWARE_VALIDATION, MODEL_PROPOSAL and ADR 0003.
 | Whisper, 299 s clip, 8 threads CPU | base 26.4 s · small 53.0 s · small + VAD 33 s |
 | Whisper smoke test | 39.7 s Vietnamese clip, base, 4 threads → 11.2 s, language detected as vi |
 
-## 16. Build, run, test
+## 17. Build, run, test
 
 | Task | Command (directory) |
 |---|---|
 | Dev run | `npm run tauri dev` (`apps/desktop`) |
-| Release build, no installer | `npm run tauri build -- --no-bundle` (`apps/desktop`) |
-| Rust tests (61 at last review) | `cargo test` (`apps/desktop/src-tauri`) |
+| Release build, no installer (app + `memora-cli.exe`) | `npm run tauri build -- --no-bundle` (`apps/desktop`) |
+| Rust tests (82 at `b751673`, 3 manual ones ignored) | `cargo test` (`apps/desktop/src-tauri`) |
+| Plans on a real library (manual) | `MEMORA_DB=<copy of memora.db> cargo test real_library_plans -- --ignored --nocapture` |
+| CLI on a copy of the data folder | `MEMORA_DATA_ROOT=<copy> memora-cli …` |
 | Worker self-checks | `python analysis.py`, `python tagging.py` (`workers/ai-worker`, using its venv) |
 | Frontend type check | `npm run build` (runs `tsc` then `vite build`) |
 
 UI screenshots: capture the app window only (PrintWindow), never the whole screen.
 
-## 17. Known limitations, open items, pending decisions
+## 18. Known limitations, open items, pending decisions
 
 **Limitations**
-- Scoring thresholds are assumptions.
-- No subject-aware crop (only centre crop or blurred background).
-- HDR is not tone-mapped.
+- Scoring thresholds, `MAX_CONCEPT_SHARE` 35 % and the timeouts are assumptions.
+- No subject-aware or per-clip manual crop (only centre crop or blurred background).
+- HDR is not detected or tone-mapped (audit M1).
+- Moved / renamed originals cannot be relinked (audit R1).
+- One transition length for the whole timeline, clamped by the shortest clip (audit E4).
+- Speech-safe cuts can stretch clips to 3× the style maximum (owner rule; open question for low-speech styles).
+- The request box only understands keywords (section 15.1).
 - Exports are ~29 Mbit/s at 1080p.
-- No FFmpeg timeout.
+- FFmpeg renders have no timeout (only ffprobe / loudness measurement do).
 - The job list is in memory only.
-- The worker is not stopped when idle.
+- The worker is not stopped when idle (audit A4: measure first).
 - No automated test for download cancel.
+
+Audit status: [IMPROVEMENT_AUDIT.md](IMPROVEMENT_AUDIT.md).
 
 **Open (Phase 7, needs approval)**
 - Packaging / installer: FFmpeg GPL licence review first, embedded Python worker.
@@ -533,7 +608,7 @@ UI screenshots: capture the app window only (PrintWindow), never the whole scree
 - Deleting spike artefacts (~1.9 GB in repo build dirs, ~1.6 GB in cache).
 - UI language.
 
-## 18. Doc / code discrepancies found (not fixed)
+## 19. Doc / code discrepancies found (not fixed)
 
 | # | Where | Discrepancy |
 |---|---|---|
