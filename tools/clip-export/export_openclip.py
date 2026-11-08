@@ -38,6 +38,13 @@ TAGS = [
     ("fireworks", "pháo hoa"),
 ]
 TEMPLATE = "a photo of {}."
+# Bad-shot detectors (own prompts, flagged negative): the Editing Core penalises windows that match them.
+NEGATIVE = [
+    ("finger over the lens", "ngón tay che ống kính", "a photo where a finger covers part of the camera lens"),
+    ("blurry shot", "ảnh nhoè", "a very blurry, out of focus photo"),
+    ("camera pointing at the ground", "quay xuống đất", "an accidental photo of the ground or pavement"),
+    ("too dark", "quá tối", "an almost black, very dark photo"),
+]
 MODEL = "ViT-B-32"
 
 
@@ -55,13 +62,15 @@ def main(ckpt, out, frames=None):
 
     tokenizer = open_clip.get_tokenizer(MODEL)
     with torch.no_grad():
-        t = model.encode_text(tokenizer([TEMPLATE.format(en) for en, _ in TAGS]))
+        t = model.encode_text(tokenizer([TEMPLATE.format(en) for en, _ in TAGS] + [prompt for _, _, prompt in NEGATIVE]))
         t = torch.nn.functional.normalize(t, dim=-1).numpy()
     (out / "openclip_tags.json").write_text(json.dumps({
         "model": f"{MODEL} laion2b_s34b_b79k", "template": TEMPLATE, "logitScale": float(model.logit_scale.exp()),
         "preprocess": {"size": 224, "resize": "shortest side, bicubic, center crop",
                        "mean": list(preprocess.transforms[-1].mean), "std": list(preprocess.transforms[-1].std)},
-        "tags": [{"en": en, "vi": vi, "embedding": [round(float(x), 6) for x in e]} for (en, vi), e in zip(TAGS, t)],
+        "tags": [{"en": en, "vi": vi, "embedding": [round(float(x), 6) for x in e]} for (en, vi), e in zip(TAGS, t)]
+        + [{"en": en, "vi": vi, "negative": True, "embedding": [round(float(x), 6) for x in e]}
+           for (en, vi, _), e in zip(NEGATIVE, t[len(TAGS):])],
     }, ensure_ascii=False), encoding="utf-8")
 
     # Consistency: IR (as installed, FP16 weights) vs PyTorch CPU.

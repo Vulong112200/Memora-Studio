@@ -12,6 +12,7 @@ mod projects;
 mod proxy;
 mod scoring;
 mod settings;
+mod sounds;
 mod tagging;
 mod timeline;
 mod transcribe;
@@ -206,9 +207,15 @@ fn get_plan(project_id: i64, state: State<'_, AppState>) -> Result<Option<editin
     with_db(&state, |c| editing::load(c, project_id))
 }
 
+/// Replaces the timeline with the kept plan clips and sets the style's look in the export options.
 #[tauri::command]
-fn apply_plan(project_id: i64, keep: Vec<usize>, state: State<'_, AppState>) -> Result<usize, String> {
-    with_db(&state, |c| editing::apply(c, project_id, &keep))
+fn apply_plan(project_id: i64, keep: Vec<usize>, state: State<'_, AppState>) -> Result<export::Options, String> {
+    let n = with_db(&state, |c| editing::apply(c, project_id, &keep))?;
+    let plan = with_db(&state, |c| editing::load(c, project_id))?.ok_or("Generate a plan first.")?;
+    let options = editing::styled_options(get_export_options(project_id, state.clone())?, &editing::style(&plan.style)?, &plan);
+    set_export_options(project_id, options.clone(), state)?;
+    tracing::info!(project_id, clips = n, "editing plan applied");
+    Ok(options)
 }
 
 #[tauri::command]
@@ -240,6 +247,68 @@ fn list_clips(project_id: i64, state: State<'_, AppState>) -> Result<Vec<timelin
 #[tauri::command]
 fn add_clip(project_id: i64, media_id: i64, in_ms: i64, out_ms: i64, state: State<'_, AppState>) -> Result<timeline::Clip, String> {
     with_db(&state, |c| timeline::add(c, project_id, media_id, in_ms, out_ms))
+}
+
+#[tauri::command]
+fn set_clip_caption(id: i64, caption: String, state: State<'_, AppState>) -> Result<(), String> {
+    with_db(&state, |c| timeline::set_caption(c, id, &caption))
+}
+
+/// Saved export options of a project (look, music, titles); defaults when never saved.
+#[tauri::command]
+fn get_export_options(project_id: i64, state: State<'_, AppState>) -> Result<export::Options, String> {
+    with_db(&state, |c| {
+        let j: Option<String> = c
+            .query_row("SELECT export_json FROM project_settings WHERE project_id = ?1", [project_id], |r| r.get(0))
+            .ok();
+        Ok(j.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default())
+    })
+}
+
+#[tauri::command]
+fn set_export_options(project_id: i64, options: export::Options, state: State<'_, AppState>) -> Result<(), String> {
+    options.check()?;
+    with_db(&state, |c| {
+        c.execute(
+            "INSERT INTO project_settings (project_id, export_json) VALUES (?1, ?2)
+             ON CONFLICT (project_id) DO UPDATE SET export_json = excluded.export_json",
+            rusqlite::params![project_id, serde_json::to_string(&options).unwrap()],
+        )
+        .map_err(db::err)
+        .map(drop)
+    })
+}
+
+#[tauri::command]
+fn list_sounds() -> Vec<sounds::Track> {
+    sounds::catalog()
+}
+
+/// Library tracks that suit the project's video: its plan style, what is on screen in the timeline clips,
+/// the timeline length and how much of it is speech.
+#[tauri::command]
+fn recommend_sounds(project_id: i64, state: State<'_, AppState>) -> Result<Vec<sounds::Recommendation>, String> {
+    with_db(&state, |c| {
+        let style = editing::load(c, project_id)?.map(|p| p.style).unwrap_or_else(|| "clean_minimal".into());
+        let clips = timeline::list(c, project_id)?;
+        let mut tags: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        let (mut total, mut speech) = (0i64, 0i64);
+        for clip in &clips {
+            let len = clip.out_ms - clip.in_ms;
+            total += len;
+            if let Some(t) = tagging::get(c, clip.media_id)? {
+                for s in tagging::summarize(&t, clip.in_ms, clip.out_ms, 0.1).into_iter().filter(|s| !s.negative) {
+                    *tags.entry(s.en).or_default() += s.score * len as f64;
+                }
+            }
+            if let Some(t) = transcribe::get(c, clip.media_id)? {
+                speech += t.segments.iter().map(|s| (s.end_ms.min(clip.out_ms) - s.start_ms.max(clip.in_ms)).max(0)).sum::<i64>();
+            }
+        }
+        let mut tags: Vec<(String, f64)> = tags.into_iter().map(|(k, v)| (k, v / total.max(1) as f64)).collect();
+        tags.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        Ok(sounds::recommend(&style, &tags, total, speech as f64 / total.max(1) as f64, 3))
+    })
 }
 
 #[tauri::command]
@@ -371,6 +440,11 @@ pub fn run() {
             list_clips,
             add_clip,
             remove_clip,
+            list_sounds,
+            recommend_sounds,
+            set_clip_caption,
+            get_export_options,
+            set_export_options,
             move_clip,
             submit_job,
             list_jobs,

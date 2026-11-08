@@ -29,11 +29,11 @@ const fold = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").r
 function matches(m: Media, q: string) {
   const f = fold(q.trim());
   if (!f) return true;
-  return fold(m.path).includes(f) || (m.tags ?? []).some((t) => t.score >= 0.1 && (fold(t.vi).includes(f) || t.en.includes(f)));
+  return fold(m.path).includes(f) || (m.tags ?? []).some((t) => !t.negative && t.score >= 0.1 && (fold(t.vi).includes(f) || t.en.includes(f)));
 }
 
 const topTags = (tags: TagScore[] | null, n: number, min: number) =>
-  (tags ?? []).filter((t) => t.score >= min).slice(0, n).map((t) => t.vi).join(", ");
+  (tags ?? []).filter((t) => !t.negative && t.score >= min).slice(0, n).map((t) => t.vi).join(", ");
 
 interface ImportResult { imported: number; ids: number[]; failed: { path: string; error: string }[] }
 interface BatchResult { failed: { id: number; error: string }[] }
@@ -87,6 +87,7 @@ function SceneCard({ s, onPick }: { s: ScoredScene; onPick: () => void }) {
         <span className={`font-semibold ${tone}`}>{pct(t.total)}</span>
       </div>
       {s.tags.length > 0 && <div className="mt-0.5 truncate text-sky-300">{topTags(s.tags, 3, 0.1)}</div>}
+      {s.tags.filter((t) => t.negative && t.score >= 0.15).map((t) => <div key={t.en} className="mt-0.5 truncate text-amber-400">⚠ {t.vi}</div>)}
       {s.flags.length > 0 && <div className="mt-0.5 truncate text-amber-400">{s.flags.join(" · ")}</div>}
     </button>
   );
@@ -306,7 +307,7 @@ export default function MediaLibrary({ project, onClipAdded }: { project: Projec
     <section className="rounded-xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
       <div className="mb-3 flex items-center justify-between gap-2">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Media library</h2>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
           {notAnalysed.length > 0 && !active(job) && (
             <button className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm dark:border-zinc-700" onClick={() => analyze(notAnalysed)}>
               Analyze {notAnalysed.length} video{notAnalysed.length === 1 ? "" : "s"}

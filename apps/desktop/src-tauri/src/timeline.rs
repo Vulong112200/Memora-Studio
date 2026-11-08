@@ -14,13 +14,15 @@ pub struct Clip {
     pub position: i64,
     pub in_ms: i64,
     pub out_ms: i64,
+    /// Text shown at the start of this clip in exports (lower third).
+    pub caption: Option<String>,
 }
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Clip> {
-    Ok(Clip { id: r.get(0)?, project_id: r.get(1)?, media_id: r.get(2)?, position: r.get(3)?, in_ms: r.get(4)?, out_ms: r.get(5)? })
+    Ok(Clip { id: r.get(0)?, project_id: r.get(1)?, media_id: r.get(2)?, position: r.get(3)?, in_ms: r.get(4)?, out_ms: r.get(5)?, caption: r.get(6)? })
 }
 
-const COLUMNS: &str = "id, project_id, media_id, position, in_ms, out_ms";
+const COLUMNS: &str = "id, project_id, media_id, position, in_ms, out_ms, caption";
 
 fn touch(c: &Connection, project_id: i64) -> Result<(), String> {
     c.execute("UPDATE projects SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1", [project_id]).map_err(err)?;
@@ -60,6 +62,18 @@ pub fn add(c: &Connection, project_id: i64, media_id: i64, in_ms: i64, out_ms: i
         .map_err(err)?;
     touch(c, project_id)?;
     Ok(clip)
+}
+
+/// Sets (or clears, with empty text) the caption of one clip.
+pub fn set_caption(c: &Connection, clip_id: i64, caption: &str) -> Result<(), String> {
+    let text = caption.trim();
+    if text.chars().count() > 200 {
+        return Err("Caption is limited to 200 characters.".into());
+    }
+    let n = c
+        .execute("UPDATE project_clips SET caption = ?2 WHERE id = ?1", rusqlite::params![clip_id, (!text.is_empty()).then_some(text)])
+        .map_err(err)?;
+    if n == 0 { Err("Clip not found.".into()) } else { Ok(()) }
 }
 
 pub fn remove(c: &Connection, clip_id: i64) -> Result<(), String> {

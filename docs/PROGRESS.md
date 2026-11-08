@@ -42,9 +42,19 @@ See `docs/MODEL_PROPOSAL.md` §4: whisper.cpp b5454 runtime installed in `<data 
 - Export: `fit: fill` centre crop for vertical output, `transitionMs` crossfades; Timeline export has both options.
 - Verified: 54 Rust tests (real FFmpeg crossfade + fill, real worker tagging with the exported IR, real whisper.cpp with VAD), `python tagging.py`, and the debug app on the real library (Smart edit generated a 20-clip Travel Cinematic plan from 96 candidates).
 
+#### Owner review round 1 (2026-11-08) — see ADR 0004 "Revision"
+- Editing: sentence-safe cuts, no chopping of unchanged shots, merged near clips, bad-shot detection (OpenCLIP v2 → owner must "Install from files" from `downloads\openclip-export-v2` and re-run "Tag").
+- Export: transitions, colour looks, fades, blurred background, music with ducking, loudness, titles/captions/subtitles; per-project options and per-clip captions (migration 9).
+- Verified: 61 Rust tests; real renders from the owner's footage (Travel Cinematic 85 s and Reels 30 s, both valid) inspected frame by frame; release app UI checked (Look & sound panel filled from the style).
+
+#### Free music library (2026-11-08) — ADR 0005
+- `sounds.json` (22 verified CC BY 4.0 tracks, Kevin MacLeod / incompetech.com) + `sounds.rs`: streamed preview, per-video recommendations, download-on-export with SHA-256 check and deletion afterwards; the owner's own audio files are never touched. Credit burned in at the end.
+- Second loudness pass (measure → exact gain + limiter): real export −19.6 → −16.4 LUFS.
+- Verified: 64 Rust tests + real download/verify/delete test, real export with library music (credit frame inspected, download folder empty afterwards), release app: library opens, preview plays, recommendation shown.
+
 ### Still open (owner decisions or later work)
 - Packaging / installer: needs the FFmpeg GPL licence review before any distribution and an embedded Python runtime (ADR 0002); not built.
-- Background music (no licensed offline source), burned-in titles (libass/freetype validation), subject-aware crop, GPS/location, month/year grouping in the library, Whisper GPU experiment.
+- Bundled music library (user's own files work now), subject-aware crop, text animation presets, GPS/location, month/year grouping in the library, Whisper GPU experiment.
 - Offline: no network use except the Model Manager's explicit, user-confirmed downloads (all models are installed locally now).
 
 ### Not done yet / next steps

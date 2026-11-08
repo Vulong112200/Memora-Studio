@@ -36,7 +36,24 @@ Vietnamese speech.
   "Apply and export" is the Auto path. Recaps = date range (last month / 6 months / year / custom) on generation.
 - Export gained centre-crop fill (vertical presets) and crossfades (xfade + acrossfade, clamped to half the shortest clip).
 
+## Revision 2026-11-08 (owner review of the first real exports)
+Feedback: one continuous shot was cut into several near-identical parts; conversations were cut mid-sentence;
+too few effects; no titles, no music, few user options. Changes, following common editing practice:
+- No sentence is ever cut: window edges move to speech boundaries (extend up to 3× the style's max clip length,
+  else shrink to exclude the speech, else drop the window).
+- No jump cuts inside one unchanged shot: a further window from a used scene needs a different picture (dHash
+  distance > 12/64) or a different main concept; at most 1 + scene length/60 s clips per scene; clips of one file
+  ≤ 1.5 s apart are merged into one continuous clip. Plans may end below the target rather than repeat content.
+- Bad-shot detectors (OpenCLIP v2 tag file, same IR): finger over the lens, blurry, ground, too dark → rank penalty
+  (up to −80 %), ⚠ reason, never the opening hook. Found on owner footage: a finger shot had technical score 99.
+- Export `Options` (saved per project, set from the style on Apply, all editable): 7 transitions (xfade), 6 colour
+  looks, fade in/out, fill/crop, blurred background instead of black bars for mismatched aspect ratios, clip sound
+  level, user music (looped, faded, sidechain-ducked under the clips' sound), EBU R128 loudness (−16 LUFS), opening
+  title + subtitle, ending text, per-clip captions and speech subtitles via a temporary ASS file (libass, Segoe UI,
+  title-safe margins; vertical video keeps text above the bottom 18 %). Vietnamese rendering verified on frames.
+- Titles: the app suggests "<main concept> · <dates>"; there is no text-generating AI in the app (no LLM in the MVP).
+
 ## Consequences / known limits
 - Weights, thresholds and taxonomy are initial assumptions; tune on a larger real library.
 - Centre crop only (no subject-aware crop); English-trained CLIP with a fixed tag list (no free-text visual search).
-- No music, no titles, no GPS/location yet; Whisper GPU not evaluated.
+- No bundled music library (the user's own files only), no GPS/location yet; Whisper GPU not evaluated.

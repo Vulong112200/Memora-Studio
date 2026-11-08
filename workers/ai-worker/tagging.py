@@ -84,7 +84,7 @@ def tag_video(path, model_dir, every_ms=2000, devices=("GPU", "CPU"), progress=N
     return {
         "model": meta["model"], "device": device, "fallbacks": fallbacks, "everyMs": every_ms,
         "seconds": round(time.perf_counter() - t0, 2),
-        "tags": [{"en": t["en"], "vi": t["vi"]} for t in meta["tags"]],
+        "tags": [{"en": t["en"], "vi": t["vi"], "negative": bool(t.get("negative"))} for t in meta["tags"]],
         "samples": samples,
     }
 

@@ -99,6 +99,12 @@ const MIGRATIONS: &[&str] = &[
         plan_json  TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     );",
+    // 9: per-clip captions and per-project export options (look, music, titles)
+    "ALTER TABLE project_clips ADD COLUMN caption TEXT;
+    CREATE TABLE project_settings (
+        project_id   INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+        export_json  TEXT NOT NULL
+    );",
 ];
 
 pub fn err(e: rusqlite::Error) -> String {

@@ -70,13 +70,13 @@ export default function EditingPlan({ project, onApplied }: { project: Project; 
   async function apply(thenExport: boolean) {
     if (!plan) return;
     try {
-      const n = await applyPlan(project.id, order);
+      const options = await applyPlan(project.id, order);
       onApplied();
       if (thenExport) {
-        await submitJob("media.export", { projectId: project.id, preset: plan.exportPreset, transitionMs: plan.transitionMs, fit: "fill" });
-        setMessage(`Timeline replaced with ${n} clips; export started (see Timeline).`);
+        await submitJob("media.export", { projectId: project.id, preset: plan.exportPreset, options });
+        setMessage(`Timeline replaced with ${order.length} clips; export started with the style's look (see Timeline).`);
       } else {
-        setMessage(`Timeline replaced with ${n} clips. You can still trim, reorder or remove them there.`);
+        setMessage(`Timeline replaced with ${order.length} clips and the style's look set (${options.color} colour, title "${options.titles.title}"). Adjust anything in Timeline › Look & sound before exporting.`);
       }
     } catch (e) {
       setMessage(String(e));

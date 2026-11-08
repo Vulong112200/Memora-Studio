@@ -18,6 +18,9 @@ const EVERY_MS: i64 = 2000;
 pub struct TagName {
     pub en: String,
     pub vi: String,
+    /// Bad-shot detector (finger over the lens, blurry…), not a content concept.
+    #[serde(default)]
+    pub negative: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,6 +44,7 @@ pub struct MediaTags {
 pub struct TagScore {
     pub en: String,
     pub vi: String,
+    pub negative: bool,
     /// Mean probability over the samples in the range (0..1).
     pub score: f64,
 }
@@ -63,7 +67,7 @@ pub fn summarize(t: &MediaTags, start_ms: i64, end_ms: i64, min: f64) -> Vec<Tag
         .filter_map(|(k, p)| {
             let name = t.tags.get(k)?;
             let score = p / inside.len() as f64;
-            (score >= min).then(|| TagScore { en: name.en.clone(), vi: name.vi.clone(), score })
+            (score >= min).then(|| TagScore { en: name.en.clone(), vi: name.vi.clone(), negative: name.negative, score })
         })
         .collect();
     out.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.en.cmp(&b.en)));
@@ -233,7 +237,7 @@ mod tests {
     /// Real worker + real exported IR (skipped when the export or FFmpeg is missing).
     #[test]
     fn tag_job_with_real_worker_and_ir() {
-        let ir = std::path::PathBuf::from(r"E:\Memora Data\downloads\openclip-export");
+        let ir = std::path::PathBuf::from(r"E:\Memora Data\downloads\openclip-export-v2");
         let (ffprobe, ffmpeg) = (media::tool_path(None, "ffprobe.exe"), media::tool_path(None, "ffmpeg.exe"));
         if !ir.join("openclip_image.xml").exists() || !ffmpeg.exists() || crate::worker::resolve(None).is_err() {
             eprintln!("skipped: exported IR, FFmpeg or worker venv not found");
@@ -252,8 +256,9 @@ mod tests {
         let p = media::parse_probe(&serde_json::from_str(&raw).unwrap()).unwrap();
         let m = env.with_db(|c| upsert(c, &clip.to_string_lossy(), 1, None, &p, &raw)).unwrap();
         env.with_db(|c| {
-            c.execute("INSERT INTO models (id, version, state, path) VALUES (?1, '1', 'ready', ?2)",
-                params![MODEL_ID, ir.to_string_lossy()]).map_err(err)
+            let version = crate::models::manifests().into_iter().find(|m| m.id == MODEL_ID).unwrap().version;
+            c.execute("INSERT INTO models (id, version, state, path) VALUES (?1, ?2, 'ready', ?3)",
+                params![MODEL_ID, version, ir.to_string_lossy()]).map_err(err)
         }).unwrap();
         let mut ai = crate::worker::runner(|| None, jo.clone(), std::sync::Arc::new(std::sync::Mutex::new(None)));
         let job = Job { id: 9, kind: "media.tag".into(), params: json!({"ids": [m.id]}), status: Status::Running, done: 0, total: 0, result: None, error: None };
@@ -261,6 +266,7 @@ mod tests {
         assert_eq!(r["failed"].as_array().unwrap().len(), 0, "{r}");
         let t = env.with_db(|c| get(c, m.id)).unwrap().unwrap();
         assert_eq!(t.samples.len(), 3, "samples at 0, 2, 4 s");
+        assert!(t.tags.iter().filter(|x| x.negative).count() == 4, "bad-shot detectors shipped");
         assert!(t.samples.iter().all(|s| s.tags.len() == 5 && s.tags.iter().all(|&(k, p)| k < t.tags.len() && (0.0..=1.0).contains(&p))));
         drop(ai);
         std::fs::remove_dir_all(dir).unwrap();

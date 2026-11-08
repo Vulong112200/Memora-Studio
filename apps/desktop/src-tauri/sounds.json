@@ -1,0 +1,375 @@
+[
+ {
+  "id": "carefree",
+  "title": "Carefree",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "upbeat",
+   "happy"
+  ],
+  "energy": "medium",
+  "durationMs": 205140,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Carefree.mp3",
+  "sha256": "8433b770a630d9b1594fd484442c677907ece899a4d149954cd2e74fd733e311",
+  "sizeBytes": 6566713,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Carefree\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "wallpaper",
+  "title": "Wallpaper",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "calm",
+   "chill"
+  ],
+  "energy": "low",
+  "durationMs": 220056,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Wallpaper.mp3",
+  "sha256": "9fa810e5193c88f1b360537366f210f16c2588106d5292f0659e9957fa274f96",
+  "sizeBytes": 8804339,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Wallpaper\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "inspired",
+  "title": "Inspired",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "cinematic",
+   "uplifting"
+  ],
+  "energy": "medium",
+  "durationMs": 286067,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Inspired.mp3",
+  "sha256": "40b1af74145cedac77814d060155ad4658e04efa14d1b649decedc98fbb25f69",
+  "sizeBytes": 9156393,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Inspired\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "life-of-riley",
+  "title": "Life of Riley",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "upbeat",
+   "happy"
+  ],
+  "energy": "high",
+  "durationMs": 235363,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Life%20of%20Riley.mp3",
+  "sha256": "1916f05cd1860949f9241e17966d334c39852b531329e4a05802720bb154c564",
+  "sizeBytes": 7533831,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Life of Riley\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "monkeys-spinning-monkeys",
+  "title": "Monkeys Spinning Monkeys",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "playful",
+   "funny"
+  ],
+  "energy": "high",
+  "durationMs": 125074,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Monkeys%20Spinning%20Monkeys.mp3",
+  "sha256": "a5bb345c23849ad0786aa0bc5157a9f2d4039660fe00282e55754d475f36dc14",
+  "sizeBytes": 5005207,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Monkeys Spinning Monkeys\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "fluffing-a-duck",
+  "title": "Fluffing a Duck",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "playful",
+   "funny"
+  ],
+  "energy": "high",
+  "durationMs": 67368,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Fluffing%20a%20Duck.mp3",
+  "sha256": "cb23b1833c35e391de10d998d6a40cfc760565ce31d23014c86025523ca8239b",
+  "sizeBytes": 2696840,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Fluffing a Duck\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "happy-alley",
+  "title": "Happy Alley",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "upbeat",
+   "happy"
+  ],
+  "energy": "high",
+  "durationMs": 80248,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Happy%20Alley.mp3",
+  "sha256": "f598c8ee624f1db9a2cd38886524a40baff4ce730dcf999c0763791268fa8265",
+  "sizeBytes": 3316821,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Happy Alley\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "easy-lemon",
+  "title": "Easy Lemon",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "calm",
+   "light"
+  ],
+  "energy": "low",
+  "durationMs": 126380,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Easy%20Lemon.mp3",
+  "sha256": "2486b8ecfe4575f9ab31613a2c03c2ee45e6e5280301d05b4dd7237c9e1c2531",
+  "sizeBytes": 5057420,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Easy Lemon\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "wholesome",
+  "title": "Wholesome",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "warm",
+   "nostalgic"
+  ],
+  "energy": "low",
+  "durationMs": 363807,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Wholesome.mp3",
+  "sha256": "9eadc79a1a2cb68cd63be1432ebf8f8ae3387cb9d2e85f9b8dbc74ba5a96b231",
+  "sizeBytes": 14556390,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Wholesome\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "healing",
+  "title": "Healing",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "calm",
+   "emotional"
+  ],
+  "energy": "low",
+  "durationMs": 520072,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Healing.mp3",
+  "sha256": "7392a8a0b9c088d640e5c28f72d9f54a74cfa9344d41040e2058b998e3fc6987",
+  "sizeBytes": 20805074,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Healing\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "dreamer",
+  "title": "Dreamer",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "calm",
+   "dreamy"
+  ],
+  "energy": "low",
+  "durationMs": 204069,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Dreamer.mp3",
+  "sha256": "615e65c9ca131c11f8e12970644ed74ef822ec4f643b1d9d0085a223600bcdfb",
+  "sizeBytes": 6532428,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Dreamer\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "meditation-impromptu-01",
+  "title": "Meditation Impromptu 01",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "calm",
+   "ambient"
+  ],
+  "energy": "low",
+  "durationMs": 212820,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Meditation%20Impromptu%2001.mp3",
+  "sha256": "ac1332a12fe020cbeee206c7f33a82e29109d5ce63636e3302454e3bdfc36187",
+  "sizeBytes": 7042622,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Meditation Impromptu 01\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "blue-feather",
+  "title": "Blue Feather",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "calm",
+   "gentle"
+  ],
+  "energy": "low",
+  "durationMs": 278073,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Blue%20Feather.mp3",
+  "sha256": "b41b5bdd74d03e41a0632b4af2c982398f4c0fc17d8e6d1c3ba2a33b2188cb3f",
+  "sizeBytes": 11248061,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Blue Feather\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "heartwarming",
+  "title": "Heartwarming",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "nostalgic",
+   "emotional"
+  ],
+  "energy": "low",
+  "durationMs": 72024,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Heartwarming.mp3",
+  "sha256": "a621a943ab940567f4136060e0f1f0637038b8a03c10ff8926f956e1b2ef34e7",
+  "sizeBytes": 2971312,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Heartwarming\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "sovereign",
+  "title": "Sovereign",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "cinematic",
+   "epic"
+  ],
+  "energy": "high",
+  "durationMs": 371566,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Sovereign.mp3",
+  "sha256": "7275fef7af71ec59a9b1c4924d23f9be4769a1f5577284119b42a996d8952d60",
+  "sizeBytes": 15020455,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Sovereign\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "pamgaea",
+  "title": "Pamgaea",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "adventure",
+   "upbeat"
+  ],
+  "energy": "high",
+  "durationMs": 168568,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Pamgaea.mp3",
+  "sha256": "9f0ad72567c49d9e1ab895937bef03058a6fc1cfcc20ba7fdd4b681f3c7b5586",
+  "sizeBytes": 6744939,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Pamgaea\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "achaidh-cheide",
+  "title": "Achaidh Cheide",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "adventure",
+   "folk"
+  ],
+  "energy": "medium",
+  "durationMs": 134060,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Achaidh%20Cheide.mp3",
+  "sha256": "414f949be0390135d637791a278350a5e1149456633e03faa8cc6b2249743c32",
+  "sizeBytes": 5475031,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Achaidh Cheide\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "clean-soul",
+  "title": "Clean Soul",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "calm",
+   "chill"
+  ],
+  "energy": "low",
+  "durationMs": 306730,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Clean%20Soul.mp3",
+  "sha256": "458868c225cf8f6dbaf17300aa2e0839386991be8581d0218554699297d7581c",
+  "sizeBytes": 12271405,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Clean Soul\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "nowhere-land",
+  "title": "Nowhere Land",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "nostalgic",
+   "calm"
+  ],
+  "energy": "low",
+  "durationMs": 132075,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Nowhere%20Land.mp3",
+  "sha256": "b4439b5c329f23cd9a650e59c59b0023986e84eba812002dd4509e277e55d2c9",
+  "sizeBytes": 4228614,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Nowhere Land\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "sneaky-snitch",
+  "title": "Sneaky Snitch",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "playful",
+   "funny"
+  ],
+  "energy": "medium",
+  "durationMs": 136620,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Sneaky%20Snitch.mp3",
+  "sha256": "db1710333d68a215277f77e4e17e1a64bf4ed38f87c70f8d0f56b16b6aa4f884",
+  "sizeBytes": 5466943,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Sneaky Snitch\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "local-forecast-elevator",
+  "title": "Local Forecast - Elevator",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "chill",
+   "light"
+  ],
+  "energy": "medium",
+  "durationMs": 189205,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Local%20Forecast%20-%20Elevator.mp3",
+  "sha256": "8c46b44e65324bc339fbbc3e770611d671f6c74a40f3ec8dd50332c082b25cc9",
+  "sizeBytes": 7570404,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Local Forecast - Elevator\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "investigations",
+  "title": "Investigations",
+  "artist": "Kevin MacLeod",
+  "moods": [
+   "mystery"
+  ],
+  "energy": "medium",
+  "durationMs": 93544,
+  "url": "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Investigations.mp3",
+  "sha256": "699f7a3cd227dfe5c1e88099b45af57202bfe9d56f86b8b43e4252b65dd96768",
+  "sizeBytes": 3745876,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "\"Investigations\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ }
+]

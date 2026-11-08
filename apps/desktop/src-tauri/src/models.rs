@@ -90,13 +90,18 @@ pub fn list(c: &Connection) -> Result<Vec<ModelView>, String> {
     manifests()
         .into_iter()
         .map(|m| {
-            let row: Option<(String, Option<String>, Option<String>, Option<String>)> = c
-                .query_row("SELECT state, error, path, details FROM models WHERE id = ?1", [&m.id], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            let row: Option<(String, Option<String>, Option<String>, Option<String>, String)> = c
+                .query_row("SELECT state, error, path, details, version FROM models WHERE id = ?1", [&m.id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
                 })
                 .optional()
                 .map_err(err)?;
-            let (state, error, path, details) = row.unwrap_or(("not_installed".into(), None, None, None));
+            let (mut state, mut error, path, details, version) = row.unwrap_or(("not_installed".into(), None, None, None, m.version.clone()));
+            if state == "ready" && version != m.version {
+                // Installed files still work, but the app expects the newer version's content.
+                state = "update_available".into();
+                error = Some(format!("Version {version} installed; version {} is available.", m.version));
+            }
             Ok(ModelView {
                 download_blocker: m.download_blocker(),
                 manifest: m,
@@ -114,6 +119,7 @@ pub fn ready_dir(c: &Connection, id: &str) -> Result<(Manifest, PathBuf), String
     let m = list(c)?.into_iter().find(|m| m.manifest.id == id).ok_or(format!("Unknown model {id}"))?;
     match (m.state.as_str(), m.path) {
         ("ready", Some(dir)) => Ok((m.manifest, PathBuf::from(dir))),
+        ("update_available", _) => Err(format!("Update {} in AI models first (a newer version is available).", m.manifest.name)),
         _ => Err(format!("Install {} in AI models first.", m.manifest.name)),
     }
 }
@@ -166,14 +172,14 @@ pub fn sha256_file(path: &Path, cancelled: &dyn Fn() -> bool, progress: &dyn Fn(
     Ok(Some(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()))
 }
 
-enum Step {
+pub(crate) enum Step {
     Cancelled,
     Failed(&'static str, String), // (failure state, message)
 }
 
 /// curl.exe download with resume (`-C -`) into `<file>.part`, renamed when complete.
 /// Progress is the size of the partial file.
-fn download(url: &str, dest: &Path, job_object: &JobObject, progress: &dyn Fn(u64), cancelled: &dyn Fn() -> bool) -> Result<(), Step> {
+pub(crate) fn download(url: &str, dest: &Path, job_object: &JobObject, progress: &dyn Fn(u64), cancelled: &dyn Fn() -> bool) -> Result<(), Step> {
     let part = dest.with_extension("part");
     let mut child = command(Path::new("curl.exe"))
         .args(["--location", "--fail", "--silent", "--show-error", "--retry", "3", "--continue-at", "-", "--output"])

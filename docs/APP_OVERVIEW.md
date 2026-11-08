@@ -1,0 +1,545 @@
+# Memora Studio — Application Overview
+
+Snapshot of the app as built, **2026-11-08**, commit `5f6bb1a` on `main`.
+One-file reference for setup, stack, AI models, processing logic and UI. Facts come from the code and the documents below. Measured numbers are quoted as written in the source documents. Anything that is an assumption is labelled as such.
+
+| Source | Role |
+|---|---|
+| [Phase 0 spec](Memora_Studio_Phase_0_Technical_Spec_and_Claude_Prompt.md) | Roadmap and approval gates (authoritative for gates) |
+| [Production.md](Production.md) | Full technical specification (v1.2) |
+| [DISCOVERY_REPORT.md](DISCOVERY_REPORT.md) | Phase 0 findings |
+| [DEPENDENCY_MATRIX.md](DEPENDENCY_MATRIX.md) | Installed tools and versions |
+| [HARDWARE_VALIDATION.md](HARDWARE_VALIDATION.md) | Phase 1b / Phase 3 measurements |
+| [MODEL_PROPOSAL.md](MODEL_PROPOSAL.md) | Model sources, licences, checksums, measurements |
+| [PROGRESS.md](PROGRESS.md) | Day log, open items |
+| [adr/](adr/) | ADR 0001–0004 |
+
+---
+
+## 1. Status
+
+| Phase | State |
+|---|---|
+| 0 Discovery | Done |
+| 1a Environment / 1b Spikes | Done (ADR 0002: embedded Python worker) |
+| 2 Desktop shell (settings, logging, hardware, DB, projects, jobs, worker) | Done |
+| 3 Media Engine (import, thumbnails, proxies, timeline, export) | Done |
+| 4 Classical analysis (scenes, quality, shake, duplicates) | Done |
+| 5 Local AI (Model Manager, transcription, OpenCLIP tagging, Silero VAD) | Done, awaiting review |
+| 6 Editing Core (smart edit, styles, crossfades, recaps, titles, music) | Done, owner review round 1 done, awaiting review |
+| 7 Product completion (packaging, installer, …) | **Not approved yet** |
+
+Still forbidden without separate approval: downloading models beyond the approved proposal, installing torch outside the dev export venv, driver / env var / Windows-settings changes, admin commands, scanning personal folders, uploading media.
+
+## 2. Product and principles
+
+- Windows desktop app to organise, analyse, edit and export personal videos.
+- **Local-first, offline-capable, AI-optional.** No cloud APIs or API keys, no CUDA, no local LLM.
+- **Original media is never modified.** Final output is always rendered from originals, **never from proxies**.
+- **AI produces observations → Editing Core decides → FFmpeg renders.**
+- The frontend never runs FFmpeg or loads models. The Rust backend orchestrates every process.
+- Model ≠ runtime ≠ device. OpenCLIP runs on OpenVINO. Whisper runs on whisper.cpp. PyTorch is dev-time only, for export.
+- CPU fallback is mandatory. GPU, NPU and QSV are validated at runtime, never assumed.
+- The app limits its own memory (fixed 2 GB pagefile): one heavy model at a time, no AI during render.
+
+## 3. Target hardware and verified environment
+
+| Item | Value |
+|---|---|
+| Machine | ASUS Zenbook 14 UX3405CA |
+| CPU | Intel Core Ultra 9 285H (16 cores / 16 threads) |
+| GPU | Intel Arc 140T, driver 32.0.101.8860. 128 MB dedicated; uses **shared system RAM** (not VRAM) |
+| NPU | Intel AI Boost, driver 32.0.100.4023 (optional, experimental) |
+| RAM | 32 GB (31.36 GB usable), **fixed 2,048 MB pagefile** |
+| OS | Windows 11 build 26300.9711 |
+| Drives | C: binaries, D: software, **E: data** (`E:\Memora Data\`) |
+
+| Tool | Version |
+|---|---|
+| FFmpeg / ffprobe | 9.0.2 (Gyan **GPL** build, dev/internal use; licence must be reviewed before distribution) |
+| OpenVINO | 2026.4.1 |
+| Python | 3.13.17 (venvs only, never system Python) |
+| Rust | 1.99.1 |
+| Tauri | 2.12.5 |
+| whisper.cpp | b5454 (= v1.9.5), CPU build |
+
+System-wide installs (winget): `Rustlang.Rustup`, `Gyan.FFmpeg`. Nothing else.
+
+## 4. Tech stack and languages
+
+| Layer | Language / tech |
+|---|---|
+| Desktop shell + backend | **Rust** (edition 2024), **Tauri 2** |
+| Frontend | **TypeScript 6 + React 19**, Vite 8, **Tailwind CSS v4** |
+| AI / analysis worker | **Python 3.13** (OpenVINO, OpenCV, PySceneDetect, NumPy) |
+| Speech | whisper.cpp native exe (`whisper-cli.exe`) |
+| Media | FFmpeg / ffprobe (external processes) |
+| Database | SQLite via `rusqlite` (bundled), WAL |
+| Model export (dev only) | Python + PyTorch + open_clip → OpenVINO IR |
+
+### 4.1 Rust crates (`apps/desktop/src-tauri/Cargo.toml`, resolved from Cargo.lock)
+
+| Crate | Resolved | Notes |
+|---|---|---|
+| tauri | 2.12.5 | feature `protocol-asset` |
+| tauri-build | 2.7.4 | build dependency |
+| tauri-plugin-dialog | 2.8.4 | file pickers |
+| serde / serde_json | 1.0.229 / 1.0.154 | |
+| tracing / tracing-subscriber / tracing-appender | 0.1.44 / 0.3.23 / 0.2.5 | JSON + env-filter |
+| rusqlite | 0.37.0 | bundled SQLite (libsqlite3-sys 0.35.0) |
+| sha2 | 0.10.9 | model checksums |
+| windows | 0.62.2 | Job Objects, DXGI, registry, memory status, file system |
+
+Package `memora-desktop` 0.1.0, lib `memora_desktop_lib`. Release profile: `codegen-units=1`, `lto`, `opt-level=3`, `panic=abort`, `strip`.
+
+### 4.2 npm packages (`apps/desktop/package.json`)
+
+| Package | Installed |
+|---|---|
+| react / react-dom | 19.3.1 |
+| @tauri-apps/api | 2.12.4 |
+| @tauri-apps/plugin-dialog | 2.8.4 |
+| @tauri-apps/cli (dev) | 2.12.4 |
+| vite (dev) | 8.3.6 |
+| tailwindcss + @tailwindcss/vite (dev) | 4.3.5 |
+| @vitejs/plugin-react (dev) | 6.2.1 |
+| typescript (dev) | 6.0.3 |
+
+No router, state library, UI kit, icon library or frontend test framework.
+
+### 4.3 Worker packages (`workers/ai-worker/requirements.lock.txt`)
+
+```
+click==8.5.1            colorama==0.4.6         numpy==2.5.4
+opencv-python-headless==5.0.0.93                openvino==2026.4.1
+openvino-telemetry==2025.2.0                    platformdirs==4.14.5
+scenedetect==0.7.2      tqdm==4.70.1
+```
+
+`scenedetect` declares `opencv-python`, which is replaced by the headless build. `pip check` warns, but only about metadata.
+
+### 4.4 Dev-only export venv (`tools/clip-export/requirements.lock.txt`, 40 pins)
+
+Key pins: `torch==2.15.0`, `torchvision==0.29.2`, `open_clip_torch==4.2.1`, `openvino==2026.4.1`, `timm==1.0.31`, `safetensors==0.8.0`, `huggingface_hub==2.4.0`, `pillow==13.0.0`.
+
+## 5. Repository layout
+
+| Path | Contents |
+|---|---|
+| `apps/desktop/` | The app: React frontend `src/`, Rust backend `src-tauri/` |
+| `apps/desktop/src-tauri/models.json` | Model manifests (embedded at build time) |
+| `workers/ai-worker/` | Production Python worker: `memora_worker.py`, `analysis.py`, `tagging.py` |
+| `tools/clip-export/` | Dev-time OpenCLIP → OpenVINO IR exporter |
+| `spikes/` | Throwaway Phase 1b spikes (protocol, QSV, OpenVINO devices, orchestrator, packaging, Tauri smoke) |
+| `docs/` | Specs, ADRs, reports |
+| `.claude/` | Claude Code commands and permissions |
+| `CLAUDE.md` | Project rules for Claude Code |
+
+`.gitignore` excludes models (`*.bin`, `*.onnx`), media, `*.db`, `.venv*`, `target/`, `node_modules/`. No data lives in the repo.
+
+## 6. Configuration and data layout
+
+### 6.1 Settings
+
+- File: `%APPDATA%\dev.memora.studio\settings.json`. Single field: `{"dataRoot": "<path>" | null}`. A missing or unreadable file falls back to defaults.
+- The default suggestion is `%LOCALAPPDATA%\MemoraStudio`. The owner uses **`E:\Memora Data\`**.
+- The data root must be absolute and must not be inside the exe folder.
+
+### 6.2 Data root layout
+
+```
+<data root>\
+  database\memora.db                    SQLite (WAL)
+  logs\memora.log.YYYY-MM-DD            daily JSON-lines logs
+  runtime\ffmpeg\                       optional bundled ffmpeg/ffprobe
+  runtime\whisper.cpp\b5454\            whisper-cli.exe, whisper.dll, ggml*.dll
+  runtime\ai-worker\python\, app\       embedded Python worker (packaging target)
+  models\<category>\<id>\<version>\     installed models
+  models\.downloads\<id>-<ver>\         resumable downloads (.part)
+  cache\thumbs\<id>.jpg                 thumbnails
+  cache\proxy\<id>.mp4                  540p preview proxies
+  cache\frames\<id>\<i>.jpg             scene representative frames
+  cache\audio\<id>.wav                  temporary 16 kHz audio for whisper
+  cache\render\titles-*.ass             temporary subtitle/title files
+  projects\<id>\exports\*.mp4           final exports
+  test-media\                           user + synthetic samples (dev)
+```
+
+### 6.3 External tool resolution
+
+| Tool | Order (first existing wins) |
+|---|---|
+| ffmpeg / ffprobe | `<data root>\runtime\ffmpeg\` → `PATH` → `%LOCALAPPDATA%\Microsoft\WinGet\Links\` (dev) → bare name |
+| whisper-cli | `<data root>\runtime\whisper.cpp\b5454\whisper-cli.exe` |
+| AI worker | `<data root>\runtime\ai-worker\python\python.exe` + `app\memora_worker.py` → dev venv `workers/ai-worker/.venv\Scripts\python.exe` |
+
+### 6.4 Tauri configuration (`tauri.conf.json`, `capabilities/default.json`)
+
+| Setting | Value |
+|---|---|
+| productName / version / identifier | Memora Studio / 0.1.0 / `dev.memora.studio` |
+| Window | 1200×800, minimum 900×600 |
+| Dev server | `http://localhost:1420` (strict port; HMR 1421 when `TAURI_DEV_HOST` is set) |
+| CSP | `default-src 'self'; img-src 'self' data: asset: http://asset.localhost; media-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'` |
+| Asset protocol | Enabled with empty static scope. At runtime only `<data root>\cache` (recursive) is allowed |
+| Capabilities | `core:default`, `dialog:allow-open` |
+| Plugins | `tauri-plugin-dialog` only |
+
+### 6.5 Logging
+
+- `tracing`, level from env `MEMORA_LOG` (EnvFilter syntax), default `info`.
+- Human-readable output to stderr always. Daily JSON files in `<data root>\logs` once a data root exists.
+- A changed data root moves file logging only after a restart.
+
+## 7. Architecture
+
+```
+React UI (WebView2)
+   │ invoke() typed wrappers in src/api.ts           ▲ "job-updated" event
+   ▼                                                  │
+Tauri commands (lib.rs, 29 commands) ──► JobManager (jobs.rs)
+                                          FIFO, ONE job at a time, in memory
+                                          │
+          ┌───────────────────────────────┼─────────────────────────────┐
+          ▼                               ▼                             ▼
+   FFmpeg / ffprobe                whisper-cli.exe              Python AI worker
+   (import, proxy, export,         (media.transcribe)           (protocol v1, JSON lines)
+    audio extraction)                                           analyze_video, tag_video,
+                                                                validate_devices,
+                                                                validate_openvino_ir
+          └───────── every child: Windows Job Object (KILL_ON_JOB_CLOSE) + CREATE_NO_WINDOW ─┘
+
+SQLite (db.rs) ◄── media, analysis, transcripts, tags, plans, timeline, models
+```
+
+### 7.1 Rust modules (`apps/desktop/src-tauri/src/`)
+
+| Module | Responsibility |
+|---|---|
+| `main.rs` / `lib.rs` | Entry, `AppState`, command registration, job routing |
+| `settings.rs` | settings.json, data root preparation |
+| `logging.rs` | tracing setup |
+| `hardware.rs` | Registry (OS, CPU), `GlobalMemoryStatusEx`, DXGI GPUs, disk free space |
+| `db.rs` | SQLite open, WAL, migrations |
+| `projects.rs` | Project CRUD (name 1–200 chars) |
+| `process.rs` | Job Object + CREATE_NO_WINDOW command builder |
+| `jobs.rs` | Job queue, progress, cancellation |
+| `worker.rs` | Python worker spawn, handshake, restart |
+| `media.rs` | ffprobe, library, job `media.import` |
+| `proxy.rs` | Thumbnails, proxies, FFmpeg helpers, job `media.proxy` |
+| `analysis.rs` | Scene/sample storage, job `media.analyze` |
+| `scoring.rs` | Pure technical score, flags, duplicates |
+| `tagging.rs` | OpenCLIP tags, job `media.tag` |
+| `transcribe.rs` | whisper.cpp, job `media.transcribe` |
+| `models.rs` | Model Manager, job `models.install` |
+| `timeline.rs` | Project clips (ordered trimmed segments) |
+| `editing.rs` | Editing Core: styles, plan generation, apply |
+| `export.rs` | Render from originals + validation, job `media.export` |
+
+### 7.2 Tauri commands
+
+`get_settings, set_data_root, get_hardware_info, list_projects, create_project, rename_project, delete_project, list_media, remove_media, list_scenes, get_transcript, set_media_mark, list_styles, generate_plan, get_plan, apply_plan, list_models, remove_model, list_clips, add_clip, remove_clip, set_clip_caption, get_export_options, set_export_options, move_clip, submit_job, list_jobs, cancel_job, get_worker_info`
+
+### 7.3 Job system
+
+- UI-submittable kinds: `validate_devices, media.import, media.proxy, media.export, media.analyze, media.transcribe, media.tag, models.install`.
+- Routing: `models.*` → models.rs; `media.*` → its module; any other kind → Python worker. `diagnostic.*` is test-only and not exposed to the UI.
+- Statuses: `queued, running, completed, failed, cancelled`. Job = `{id, kind, params, status, done, total, result, error}`.
+- One executor thread (`job-executor`). Cancel: a queued job is cancelled immediately; a running job is flagged and the runner polls the flag.
+- Only the latest 50 finished jobs are kept, in memory only.
+- Media jobs use 1000 progress units per file, collect failures per file and continue. The result is `{done, failed}`.
+
+## 8. Database (`db.rs`)
+
+`<data root>\database\memora.db`. `journal_mode=WAL`, `foreign_keys=ON`, busy timeout 5 s. Migrations are append-only and tracked by `PRAGMA user_version`, each in its own transaction. The app **refuses a database with a newer schema**.
+
+| # | Tables / change | Key columns |
+|---|---|---|
+| 1 | `projects` | id, name (CHECK 1–200), created_at, updated_at |
+| 2 | `media` | path (UNIQUE NOCASE), size, modified_unix, duration_ms, width, height, rotation, fps, video/audio codec, audio_streams, bitrate, source_created_at, **probe_json** (raw ffprobe), imported_at |
+| 3 | `project_clips` | project_id (CASCADE), media_id (CASCADE), position, in_ms ≥ 0, out_ms > in_ms |
+| 4 | `media_analysis`, `scenes` | analysis version/quality; scenes idx, start/end_ms, shake, frame_path, samples_json |
+| 5 | `models` | id, version, state, error, path, details (no row = not installed) |
+| 6 | `transcripts` | media_id, model_id, language, segments_json |
+| 7 | `media_tags` | media_id, model_id, device, tags_json |
+| 8 | `media_marks`, `editing_plans` | favorite, excluded; project_id, style, plan_json |
+| 9 | `project_clips.caption`, `project_settings` | caption TEXT; export_json per project |
+
+Timestamps are ISO-8601 UTC strings.
+
+## 9. Media pipeline
+
+### 9.1 Import (`media.import`, params `{paths}`)
+
+- Picker filter: mp4, mov, m4v, mkv, avi, mts, m2ts, 3gp, webm, wmv.
+- ffprobe: `-v error -print_format json -show_format -show_streams`.
+- Parsing: the first video stream that is not an attached picture. Duration from the format, else the stream (must be > 0). Rotation from the display matrix, else legacy `tags.rotate`, normalised to 0..359. fps from `avg_frame_rate`, else `r_frame_rate`. Recording date from `com.apple.quicktime.creationdate`, else `creation_time`.
+- Re-importing a known path whose size or mtime changed clears its analysis, transcript, tags and cache.
+- A thumbnail is generated on every import. The UI then submits `media.analyze` for the new files automatically.
+
+### 9.2 Thumbnails and proxies (`proxy.rs`)
+
+| Item | Setting |
+|---|---|
+| Thumbnail | Frame at 10 % of the duration, short side 180, `-q:v 4` |
+| Proxy | Short side **540**, never upscaled, even dimensions, rotation applied; fps capped at **30** when the source is above 30.5; H.264 + AAC 96k stereo; `+faststart` |
+| Attempt 1 `qsv` (unrotated only) | Full GPU: `-hwaccel qsv`, `vpp_qsv`, `h264_qsv -preset veryfast -global_quality 28` |
+| Attempt 2 `hybrid` | QSV decode `-noautorotate` → `hwdownload` → manual transpose → display matrix removed → `h264_qsv` |
+| Attempt 3 `libx264` | `-preset veryfast -crf 26`, yuv420p |
+| Safety | Written as `.part`, then renamed. Existing proxies are kept |
+
+The user's DJI samples are HEVC Main10 10-bit 2688×1512 50 fps. Proxies and thumbnails handle 10-bit sources.
+
+## 10. Classical analysis and scoring
+
+### 10.1 Worker `analysis.py` (one OpenCV pass over the **proxy**, never the original)
+
+| Parameter | Value |
+|---|---|
+| Sample interval | fast 2.0 s / **balanced 1.0 s** (default) / detailed 0.5 s |
+| Scene detection | PySceneDetect `AdaptiveDetector(min_scene_len = fps·0.6)` on frames 320 px wide |
+| Global motion | `cv2.phaseCorrelate` on 160 px grey frames; shift kept only if response > 0.1 |
+| Shake | std of (shift − 0.5 s moving average) / 160; 0 if fewer than 5 shifts |
+| Sample metrics | sharpness = Laplacian variance; brightness = mean/255; contrast = std/255; clipLow ≤ 10; clipHigh ≥ 245; black = mean < 20 and std < 10; 64-bit dHash (9×8) |
+| Scene frame | Sample nearest the midpoint, JPEG 320 px wide, quality 85 |
+| Self-check | `python analysis.py` (synthetic scenes; asserts cuts ±70 ms, black, sharpness and shake ratios, dHash) |
+
+Known gap (`ponytail:` comment): a scene shorter than the sample interval may get no sample.
+
+### 10.2 `scoring.rs` (pure, computed when read, never stored)
+
+> **The thresholds are initial assumptions**, not validated on a broad set of footage.
+
+Per-sample values are medians over the scene.
+
+| Component | Formula | Weight |
+|---|---|---|
+| sharpness | clamp((log10(lapVar) − 1.5) / 2) | 0.35 |
+| exposure | clamp(1 − 4·(clipLow + clipHigh)) | 0.20 |
+| brightness | clamp(1 − max(0, \|b − 0.45\| − 0.2) / 0.25) | 0.15 |
+| contrast | clamp(c / 0.18) | 0.10 |
+| stability | clamp(1 − shake / 0.02) | 0.20 |
+
+The total is 0 when the scene has no samples or is black (more than 50 % black samples).
+
+Flags: `not sampled`, `black`, `blurry` (sharpness < 0.3), `shaky` (stability < 0.4), `dark` (brightness < 0.2), `overexposed` (clipped > 0.15 and high > low), `duplicate`.
+Duplicates: dHash Hamming distance ≤ **6** of 64, compared across the whole library.
+
+## 11. AI models and runtimes
+
+### 11.1 Models (`models.json`)
+
+| id | Version | Category | Runtime / device | Files (bytes) | Min RAM | Licence | Source | SHA-256 | `validated` |
+|---|---|---|---|---|---|---|---|---|---|
+| `openclip-vit-b32` | 2 | vision | OpenVINO IR / GPU → CPU | `openclip_image.xml` 491,391; `openclip_image.bin` 175,698,576; `openclip_tags.json` 279,986 | 8 GB | MIT (open_clip); LAION card: English-only, research-oriented | Local export of `laion/CLIP-ViT-B-32-laion2B-s34B-b79K@1a25a44…` (offline install only, no URL) | yes | false |
+| `whisper-base` | 1 | speech | whisper.cpp / CPU | `ggml-base.bin` 147,951,465 | 4 GB | MIT | HF pinned `@5359861c…` | yes | false |
+| `whisper-small` | 1 | speech | whisper.cpp / CPU | `ggml-small.bin` 487,601,967 | 8 GB | MIT | HF pinned `@5359861c…` | yes | false |
+| `silero-vad` | 1 | speech | whisper.cpp / CPU | `ggml-silero-v6.2.0.bin` 885,098 | 1 GB | MIT | HF pinned `@9ffd54a1…` | yes | true |
+
+Runtime binary: whisper.cpp **b5454** `whisper-bin-x64.zip` (8,928,640 B, MIT, SHA-256 recorded in MODEL_PROPOSAL). CPU build only; the release has no Vulkan/SYCL build for Windows.
+
+### 11.2 Model Manager (`models.rs`)
+
+- Pipeline: download with `curl.exe --location --fail --retry 3 --continue-at -` (resumable `.part`), or copy from local files → size + **SHA-256** check → versioned install to `models\<category>\<id>\<version>\` → load validation (OpenVINO IR models compile and run one inference on zeros in the worker via `validate_openvino_ir`).
+- States: `not_installed, downloading, verifying, installing, validating, ready, download_failed, checksum_failed, install_failed, model_load_failed`, plus computed `update_available`.
+- A manifest without a URL or checksum disables download. Nothing downloads without user confirmation in the UI.
+
+### 11.3 Transcription (`transcribe.rs`, job `media.transcribe`)
+
+- Params: `{ids, model: "whisper-base"|"whisper-small", language: "auto"|"vi"|"en"}`. The UI defaults to small + auto.
+- Audio is extracted to `cache\audio\<id>.wav` (16 kHz mono PCM) and deleted afterwards. Progress split: extraction 15 %, whisper 85 %.
+- Command: `whisper-cli -oj -np -pp -mc 0 -sns -l <lang> -t <threads>`. Threads = half the logical CPUs, clamped to 1–8.
+- **Anti-hallucination**: `-mc 0` (no context carry-over), `-sns` (suppress non-speech), Silero VAD (`--vad -vm ggml-silero-v6.2.0.bin`) whenever `silero-vad` is installed, and runs of **≥ 4 identical consecutive segments are dropped**.
+- A file with no audio gets an empty transcript. The UI warns that it is machine transcription.
+
+### 11.4 Tagging (`tagging.rs` + worker `tagging.py`, job `media.tag`)
+
+- Needs `openclip-vit-b32` in state `ready`. Missing proxies are created first. Reads the proxy.
+- Samples every **2000 ms**. Preprocessing: short side to 224 (bicubic), centre crop, CLIP mean/std.
+- Device: the first of `["GPU","CPU"]` that compiles and gives finite output. The NPU is not used by default. Devices that failed are reported as `fallbacks`.
+- Image embedding is L2-normalised, then multiplied against precomputed text embeddings × logitScale, softmax, **top-5** kept.
+- Fixed bilingual taxonomy (English/Vietnamese): **48 concept tags + 4 negative "bad shot" detectors** (finger over the lens, blurry shot, camera pointing at the ground, too dark). Prompt template `"a photo of {}."`.
+- `summarize(start, end, min)` gives the mean probability per tag over a time range; Editing Core uses min 0.1.
+
+### 11.5 OpenCLIP export (dev only, `tools/clip-export/export_openclip.py`)
+
+`python export_openclip.py <checkpoint.safetensors> <out dir> [frames dir]`, run offline (`HF_HUB_OFFLINE=1`). Checkpoint: ViT-B/32 `laion2b_s34b_b79k`, `open_clip_model.safetensors` (605,143,316 B; safetensors chosen to avoid pickle). Steps: `ov.convert_model(model.visual)` → [1,3,224,224] → FP16 weights. Text embeddings are precomputed into `openclip_tags.json`. Check: cosine ≥ 0.999 vs PyTorch and 100 % top-tag agreement.
+
+### 11.6 Python worker protocol v1 (`memora_worker.py` ↔ `worker.rs`)
+
+- JSON lines over stdio (stdin decoded as `utf-8-sig`). Large data is passed as file paths.
+- **Single-threaded.** Blocking stdin read only while idle. During a job it polls with `PeekNamedPipe`, because a thread blocked on stdin deadlocks `import numpy/openvino` on Windows.
+- Start: `python -u memora_worker.py` in the Job Object. The worker must send `{"type":"hello","protocol":1,pid,python,openvino,devices,startupMs}` within **60 s**, otherwise it is killed. If OpenVINO fails to import, the worker still starts and reports `runtimeError`.
+- In: `health`, `job.start {id,kind,params}`, `job.cancel {id}`, `shutdown`. Out: `hello`, `health.ok`, `job.progress`, `job.result`, `job.cancelled`, `job.error`, `error`.
+- Started on demand, restarted after a crash on the next job. The app polls every 100 ms.
+
+| Worker job | Purpose |
+|---|---|
+| `validate_devices` | Compile a test MLP on every OpenVINO device; compile/infer ms, precision, rel. error (ok < 1e-2) |
+| `analyze_video` | `analysis.analyze(proxy, framesDir, quality)` |
+| `tag_video` | `tagging.tag_video(proxy, modelDir, everyMs=2000, devices=[GPU,CPU])` |
+| `validate_openvino_ir` | Model Manager load test |
+| `diagnostic.steps` / `diagnostic.crash` | Tests only |
+
+## 12. Editing Core (`editing.rs`)
+
+Deterministic, with no LLM. Inputs: scenes + scores, tags, transcripts, user marks (★ favorite, ⊘ exclude).
+
+### 12.1 Styles
+
+| id | Target | Preset | Clip min / ideal / max | Transition | Weights [tech, sem, speech, fav] | Look | Speech captions | Opening → ending |
+|---|---|---|---|---|---|---|---|---|
+| `travel_cinematic` | 90 s | landscape | 3 / 4.5 / 6 s | 600 ms fade | .45 .40 .05 .10 | cinematic | no | landscape → sunset/sea/sky |
+| `social_story` | 30 s | reels (9:16) | 1.5 / 2 / 3 s | hard cuts | .40 .40 .00 .20 | vivid | no | strongest clip (hook) → people |
+| `memory_nostalgia` | 180 s | landscape | 3 / 5 / 7 s | 800 ms fade | .20 .40 .20 .20 | warm | no | chronological → family/friends |
+| `travel_documentary` | 300 s | landscape | 5 / 8 / 15 s | 300 ms fade | .30 .25 .35 .10 | none | yes | landscape/city → chronological |
+| `clean_minimal` | 60 s | landscape | 3 / 4 / 5 s | hard cuts | .60 .25 .00 .15 | none | no | chronological |
+
+### 12.2 Plan generation
+
+1. **Gather**: media filtered by recording day (date range: whole library, last month / 6 months / year, custom). Skipped files get a reason: "excluded by you", "not analysed yet", "no scene long enough for this style".
+2. **Candidate windows**: scenes shorter than min are dropped. Scenes up to max are used whole. Longer scenes are cut into ideal-length windows.
+3. **Sentence-safe cuts (`fit_speech`)**: an edge that falls inside speech is extended to the whole segment (clip ≤ 3×max, inside the scene), or shrunk to exclude it (clip ≥ min), or the window is dropped. At most 4 iterations.
+4. **Scores**: technical (samples in the window), semantic (0.5 if untagged; otherwise 0.5·top + 0.5·min(1, 2·favoured-concept score)), speech (fraction of the window covered by speech), favorite (0/1). Weighted by the style.
+5. **Bad-shot penalty**: rank × (1 − min(0.8, 2·Σ negative-tag scores)), i.e. up to −80 %.
+6. **Greedy selection** while total + min ≤ target. Overlaps in the same file and duplicate scenes are skipped. At most 1 + scene_ms/60,000 clips per scene. A second clip from the same scene needs dHash distance > 12 **or** a different dominant concept.
+   Diversity multiplier = 0.85^(same concept) × 0.9^(same file) × 0.6^(same file within 3×ideal).
+7. **Story structure**: chronological order by (day, media, in), then the opening clip (style's `open_with`, score > 0.2, or the hook) moves first and the ending clip (`end_with`) moves last.
+8. **merge_near**: consecutive clips from one file ≤ 1.5 s apart are merged.
+9. **Suggested title**: most frequent Vietnamese main tag + date range, e.g. "Xe đạp · 20 – 27/02/2026".
+
+### 12.3 Apply
+
+- The user can reorder or drop clips in the UI (frontend only), then **Apply to timeline** replaces `project_clips` in one transaction.
+- Styled export options are saved too: fill = (preset is reels), the style's transition and colour, fade on, normalise on, speech captions per style, and the suggested title only if none is set. Existing music and texts are kept.
+- **Apply and export** also submits `media.export`.
+
+## 13. Timeline and export
+
+### 13.1 Timeline (`timeline.rs`)
+
+Ordered trimmed segments of a project. `out_ms` is clamped to the media duration; a clip must be at least 100 ms. Caption up to 200 chars. Moving a clip swaps it with its neighbour. Rows cascade on project or media delete.
+
+### 13.2 Export (`export.rs`, job `media.export {projectId, preset, options}`)
+
+Renders from the **original files**. The job fails if the timeline is empty or an original is missing.
+
+| Preset | Size | FPS |
+|---|---|---|
+| `landscape` | 1920×1080 | 30 |
+| `story` | 1080×1920 | 30 |
+| `reels` | 1080×1920 | 30 |
+| `archive` | First clip's upright size (never scaled) | First clip's fps, ≤ 60 (default 30) |
+
+| Encoder (in order, fallback logged) | Settings |
+|---|---|
+| `hybrid-qsv` | QSV decode, `h264_qsv -preset medium -global_quality 22`, nv12 |
+| `libx264` | Software decode, `-preset medium -crf 20`, yuv420p |
+| Audio | AAC 192k, 48 kHz stereo; `+faststart` |
+
+**Options**
+
+| Option | Values / behaviour |
+|---|---|
+| Framing | `fill` = centre crop. Otherwise pad if the aspect ratio is within 5 %, else the clip sits on a **blurred, darkened copy of itself** (no black bars). Subject-aware crop is not implemented |
+| Transition | 0 / 300 / 500 / 800 / 1200 ms; `fade, dissolve, fadeblack, smoothleft, slideleft, wipeleft, circleopen` via `xfade` + `acrossfade`. Clamped to half of the shortest clip |
+| Colour look | `none, warm, cool, vivid, cinematic, vintage, bw` (fixed filter strings) |
+| Fade | From/to black, 600 ms (≤ total/4), audio too |
+| Clip volume | 0–2 (UI 0–1.5) |
+| Music | User file (mp3, m4a, aac, wav, flac, ogg, opus), looped and trimmed, 1.5 s fade-out, volume (default 0.35), optional **ducking** (`sidechaincompress` under speech) |
+| Normalise | `loudnorm I=-16 TP=-1.5 LRA=11` |
+| Text | Opening title + subtitle (0–4 s), per-clip captions (4 s labels), speech subtitles from transcripts, ending text (last 3.5 s). Burned in with ASS, Segoe UI Semibold. User text is neutralised (`\`→`/`, `{}`→`()`) |
+
+Duration = Σ clip lengths − (N−1)·transition.
+Output: `<data root>\projects\<id>\exports\<name>-<preset>-<unix>.mp4`, written as `.part` and renamed.
+
+**Validation** (progress 900–1000 of 1000):
+- Checks: exists, size > 0; duration within ±(200 + 100·segments) ms; resolution = target and rotation 0; has audio; full decode with `-xerror`.
+- Warnings: black segments (`blackdetect d=1`), clipping (max ≥ −0.1 dB), silence (mean ≤ −80 dB).
+- The report shows output path, size, duration, render seconds, encoder, checks and warnings.
+
+## 14. User interface (`apps/desktop/src/`)
+
+- **One scrolling page** of cards (`max-w-5xl`, 2-column grid on large screens). No router or tabs. State is plain React `useState`. `job-updated` is the only backend event the UI listens to.
+- **Styling**: Tailwind v4 utilities only (`index.css` = `@import "tailwindcss"` + `color-scheme: light dark`). Zinc neutrals; light/dark follows the OS. Red = errors, amber = warnings, green = success, sky = tags. Icons are Unicode characters (★ ⊘ ↑ ↓ ♪ ⚠ ✓ ✗). The preview area is always dark.
+- **UI language**: English labels (the owner has not decided the UI language yet). Search folds Vietnamese diacritics.
+
+| Card (order) | File | Shown when | What it does |
+|---|---|---|---|
+| Data folder | `App.tsx` | settings loaded | First run: choose the data root (prefilled default). Shows the log folder, DB errors, "restart required" |
+| Projects | `Projects.tsx` | data root OK | Create / open / rename / delete (originals not affected) |
+| Smart edit · {project} | `EditingPlan.tsx` | project open | Style + date range → Generate plan. Clip list with T/S/V/★ scores, reasons, ↑/↓/Drop, restore. Apply, or Apply and export |
+| Timeline · {project} | `Timeline.tsx` | project open | Ordered clips with thumbnail, caption, in→out, ↑/↓/Remove, total duration. Preset + **Look & sound** (Picture / Sound / Text) + Export, progress, validation report |
+| Media library | `MediaLibrary.tsx` | data root OK | Add videos, Analyze / Tag / Transcribe N videos (model select), search by name/tag (EN/VI), table (thumbnail, recorded, length, resolution, fps, codec, size, analysis, speech, concepts), ★ / ⊘ / Remove |
+| ↳ Preview | `MediaLibrary.tsx` | row selected | `<video>` of the **proxy** ("exports always use the original"). Set In / Set Out → "Add to {project}" |
+| ↳ Scene strip | `MediaLibrary.tsx` | analysed | Frame, time, score 0–100 (green ≥ 70, amber ≥ 40, red), top-3 tags, ⚠ negatives, flags; hover shows the breakdown; click sets In/Out |
+| ↳ Transcript | `MediaLibrary.tsx` | transcribed | Segments; click sets In/Out |
+| AI Center | `AiCenter.tsx` | always | Validate AI devices, worker status (Python, OpenVINO, devices), job log (non-media jobs) with device table |
+| AI models | `Models.tsx` | data root OK | Model rows with state, size, licence; Download (with confirmation: size, licence, URLs, SHA-256), Install from files, Remove, Cancel, per-device load results |
+| System / Graphics | `App.tsx` | always | OS, CPU, RAM, commit charge (amber below 8 GiB), data-drive free space; GPUs with dedicated/shared memory and driver |
+
+All Tauri calls go through typed wrappers in `src/api.ts`.
+
+## 15. Measured performance (single runs, indicative, not benchmarks)
+
+Quoted from HARDWARE_VALIDATION, MODEL_PROPOSAL and ADR 0003.
+
+| What | Result |
+|---|---|
+| Encode 60 s clip, fps | libx264 196.8 · h264_qsv 339.5 · hevc_qsv 373.4 · full-HW H.264 380.5 |
+| Decode HEVC 10-bit, 60 s, fps | software 360.0 · hevc_qsv 784.2 |
+| OpenVINO test MLP (compile / avg infer) | CPU 0.041 s / 2.339 ms · GPU 2.599 s / 0.683 ms · NPU 0.517 s / 1.827 ms |
+| Worker orchestration | handshake ~430–640 ms warm, cancel ~50 ms, crash restart ~440–510 ms |
+| Tauri release | exe 4.2 MB, working set 26.4 MB |
+| Proxy, 39.7 s DJI clip | QSV full 4.4 s · software + h264_qsv 24.4 s · libx264 21.9 s |
+| Export 20 s segment | hybrid 7.0 s vs software 28.8 s |
+| App end-to-end export | 11.4 s, 162.5 MB (~29 Mbit/s at 1080p) |
+| Analysis | 5 min proxy (8 975 frames) in 35 s (~256 fps); 6 clips (~7.5 min) in ~51 s |
+| OpenCLIP image encoder, batch 1 (compile / per frame) | CPU 321 ms / 22.6 ms · GPU 1932 ms / 3.8 ms · NPU 7667 ms / 11.1 ms |
+| Tagging | 150 samples in 13 s on GPU |
+| Whisper, 299 s clip, 8 threads CPU | base 26.4 s · small 53.0 s · small + VAD 33 s |
+| Whisper smoke test | 39.7 s Vietnamese clip, base, 4 threads → 11.2 s, language detected as vi |
+
+## 16. Build, run, test
+
+| Task | Command (directory) |
+|---|---|
+| Dev run | `npm run tauri dev` (`apps/desktop`) |
+| Release build, no installer | `npm run tauri build -- --no-bundle` (`apps/desktop`) |
+| Rust tests (61 at last review) | `cargo test` (`apps/desktop/src-tauri`) |
+| Worker self-checks | `python analysis.py`, `python tagging.py` (`workers/ai-worker`, using its venv) |
+| Frontend type check | `npm run build` (runs `tsc` then `vite build`) |
+
+UI screenshots: capture the app window only (PrintWindow), never the whole screen.
+
+## 17. Known limitations, open items, pending decisions
+
+**Limitations**
+- Scoring thresholds are assumptions.
+- No subject-aware crop (only centre crop or blurred background).
+- HDR is not tone-mapped.
+- Exports are ~29 Mbit/s at 1080p.
+- No FFmpeg timeout.
+- The job list is in memory only.
+- The worker is not stopped when idle.
+- No automated test for download cancel.
+
+**Open (Phase 7, needs approval)**
+- Packaging / installer: FFmpeg GPL licence review first, embedded Python worker.
+- Bundled music, subject-aware crop, text animation, GPS, month/year grouping, Whisper GPU experiment.
+
+**Pending owner decisions**
+- OpenVINO telemetry opt-out.
+- Deleting spike artefacts (~1.9 GB in repo build dirs, ~1.6 GB in cache).
+- UI language.
+
+## 18. Doc / code discrepancies found (not fixed)
+
+| # | Where | Discrepancy |
+|---|---|---|
+| 1 | MODEL_PROPOSAL, ADR 0004 vs `tools/clip-export/export_openclip.py` | Docs say 49 bilingual tags; code has 48 + 4 negatives |
+| 2 | `models.json` | `openclip-vit-b32` has `validated: false`, though CPU/GPU/NPU measurements are recorded |
+| 3 | `apps/desktop/src-tauri/src/transcribe.rs:61` | `ponytail:` comment says VAD is "pending model approval"; VAD is implemented and used |
+| 4 | `apps/desktop/src-tauri/src/editing.rs` | Style text constants `NO_MUSIC` / `NO_TITLES` say music and titles are unavailable; export implements both |
+| 5 | `docs/PROGRESS.md` | The "Not done yet / next steps" block is stale (model proposal and Phase 6 are already done) |
+| 6 | `docs/HARDWARE_VALIDATION.md` §6 | OpenCLIP and whisper.cpp still listed as "Unknown (Phase 5)"; numbers are in MODEL_PROPOSAL §4 |

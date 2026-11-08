@@ -147,16 +147,52 @@ export interface Plan {
   clips: PlanClip[];
   skipped: string[];
   candidates: number;
+  suggestedTitle: string;
 }
 
 export const listStyles = () => invoke<EditingStyle[]>("list_styles");
 export const generatePlan = (projectId: number, style: string, from?: string, to?: string) =>
   invoke<Plan>("generate_plan", { projectId, style, from: from ?? null, to: to ?? null });
 export const getPlan = (projectId: number) => invoke<Plan | null>("get_plan", { projectId });
-export const applyPlan = (projectId: number, keep: number[]) => invoke<number>("apply_plan", { projectId, keep });
+/** Replaces the timeline with the kept clips; returns the export options with the style's look applied. */
+export const applyPlan = (projectId: number, keep: number[]) => invoke<ExportOptions>("apply_plan", { projectId, keep });
+
+/** Look and sound of an export (src-tauri/src/export.rs `Options`). */
+export interface ExportOptions {
+  fill: boolean;
+  transitionMs: number;
+  transition: string;
+  color: string;
+  fade: boolean;
+  originalVolume: number;
+  /** `library` = free library track id (downloaded only while exporting); else `path` = the user's own file. */
+  music: { path: string; library: string | null; volume: number; duck: boolean } | null;
+  titles: { title: string; subtitle: string; ending: string; captions: boolean };
+  normalize: boolean;
+}
+
+export const getExportOptions = (projectId: number) => invoke<ExportOptions>("get_export_options", { projectId });
+export const setExportOptions = (projectId: number, options: ExportOptions) => invoke<void>("set_export_options", { projectId, options });
+/** Free music library track (src-tauri/sounds.json). */
+export interface Track {
+  id: string;
+  title: string;
+  artist: string;
+  moods: string[];
+  energy: "low" | "medium" | "high";
+  durationMs: number;
+  url: string;
+  license: string;
+  credit: string;
+}
+export interface SoundRecommendation { id: string; score: number; reasons: string[] }
+export const listSounds = () => invoke<Track[]>("list_sounds");
+export const recommendSounds = (projectId: number) => invoke<SoundRecommendation[]>("recommend_sounds", { projectId });
+
+export const setClipCaption = (id: number, caption: string) => invoke<void>("set_clip_caption", { id, caption });
 
 /** Mean OpenCLIP probability of a tag over a time range (src-tauri/src/tagging.rs). */
-export interface TagScore { en: string; vi: string; score: number }
+export interface TagScore { en: string; vi: string; score: number; /** bad-shot detector, not content */ negative: boolean }
 
 /** whisper.cpp transcript (src-tauri/src/transcribe.rs). Times are in the original file. */
 export interface Transcript {
@@ -177,6 +213,7 @@ export interface Clip {
   position: number;
   inMs: number;
   outMs: number;
+  caption: string | null;
 }
 
 export type ExportPreset = "landscape" | "story" | "reels" | "archive";

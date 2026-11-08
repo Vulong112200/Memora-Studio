@@ -39,6 +39,11 @@ pub struct Style {
     /// Concepts preferred for the first / last clip.
     pub open_with: &'static [&'static str],
     pub end_with: &'static [&'static str],
+    /// Export look applied with the plan (export.rs TRANSITIONS / COLORS); editable before export.
+    pub transition: &'static str,
+    pub color: &'static str,
+    /// Burn speech subtitles by default (talk-driven styles).
+    pub captions: bool,
 }
 
 const LANDSCAPES: &[&str] = &["aerial view", "mountain", "sea", "beach", "sky and clouds", "sunrise", "lake", "waterfall", "rice field", "forest"];
@@ -55,6 +60,7 @@ pub fn styles() -> Vec<Style> {
             opening: "Establishing landscape shot", ending: "Calm scenery (sunset, sea, sky)",
             weights: [0.45, 0.4, 0.05, 0.1], favor: LANDSCAPES,
             open_with: &["aerial view", "mountain", "sea", "beach", "sky and clouds", "sunrise"], end_with: &["sunset", "sea", "sky and clouds", "lake"],
+            transition: "fade", color: "cinematic", captions: false,
         },
         Style {
             id: "social_story", name: "Social Story / Reels", target_ms: 30_000, export_preset: "reels",
@@ -63,6 +69,7 @@ pub fn styles() -> Vec<Style> {
             opening: "Strongest clip first (hook)", ending: "People moment",
             weights: [0.4, 0.4, 0.0, 0.2], favor: &["people", "group of friends", "selfie", "food", "drinks", "fireworks", "concert", "sunset", "beach"],
             open_with: &[], end_with: PEOPLE,
+            transition: "fade", color: "vivid", captions: false,
         },
         Style {
             id: "memory_nostalgia", name: "Memory / Nostalgia", target_ms: 180_000, export_preset: "landscape",
@@ -71,6 +78,7 @@ pub fn styles() -> Vec<Style> {
             opening: "Chronological start", ending: "Family / friends moment",
             weights: [0.2, 0.4, 0.2, 0.2], favor: &["family", "child", "group of friends", "people", "birthday party", "wedding", "food", "dog", "cat"],
             open_with: &[], end_with: &["family", "group of friends", "people", "child"],
+            transition: "fade", color: "warm", captions: false,
         },
         Style {
             id: "travel_documentary", name: "Travel Documentary", target_ms: 300_000, export_preset: "landscape",
@@ -79,6 +87,7 @@ pub fn styles() -> Vec<Style> {
             opening: "Establishing landscape shot", ending: "Chronological end",
             weights: [0.3, 0.25, 0.35, 0.1], favor: &["city street", "market", "temple", "church", "building", "restaurant", "mountain", "sea", "hiking trail", "road trip on a highway"],
             open_with: &["aerial view", "mountain", "city street", "sea"], end_with: &[],
+            transition: "fade", color: "none", captions: true,
         },
         Style {
             id: "clean_minimal", name: "Clean Minimal", target_ms: 60_000, export_preset: "landscape",
@@ -86,6 +95,7 @@ pub fn styles() -> Vec<Style> {
             music: NO_MUSIC, titles: NO_TITLES, pacing: "Even rhythm; the technically best footage",
             opening: "Chronological start", ending: "Chronological end",
             weights: [0.6, 0.25, 0.0, 0.15], favor: &[], open_with: &[], end_with: &[],
+            transition: "fade", color: "none", captions: false,
         },
     ]
 }
@@ -195,9 +205,14 @@ pub struct Plan {
     /// Why library files were not used.
     pub skipped: Vec<String>,
     pub candidates: usize,
+    /// Title proposal from the main concept and the recording dates (the user edits it before export).
+    #[serde(default)]
+    pub suggested_title: String,
 }
 
 const SCENE_TAG_MIN: f64 = 0.1;
+/// Rank penalty per unit of bad-shot probability (summed over detectors), capped at 80 %.
+const BAD_SHOT_WEIGHT: f64 = 2.0;
 
 fn overlap(a0: i64, a1: i64, b0: i64, b1: i64) -> i64 {
     (a1.min(b1) - a0.max(b0)).max(0)
@@ -227,6 +242,8 @@ struct Candidate {
     clip: PlanClip,
     order: (String, i64, i64),
     dominant: Option<String>,
+    hash: Option<String>,
+    scene_ms: i64,
     duplicates: Vec<(i64, i64)>,
     opens: f64,
     ends: f64,
@@ -247,11 +264,45 @@ fn window_technical(sc: &ScoredScene, a: i64, b: i64) -> f64 {
     scoring::score(vec![scene], &[])[0].technical.total
 }
 
+/// Moves window edges out of speech so no sentence is cut: extend to the whole utterance when the clip
+/// stays ≤ `speech_cap`, else shrink to exclude it, else drop the window (owner feedback: a sentence cut
+/// in half is worse than no sentence). Edges never leave the scene.
+fn fit_speech(mut a: i64, mut b: i64, speech: &[(i64, i64)], scene: (i64, i64), st: &Style) -> Option<(i64, i64)> {
+    let cap = st.clip_max_ms * 3;
+    for _ in 0..4 {
+        let cut_a = speech.iter().find(|&&(s, e)| s < a && a < e).copied();
+        let cut_b = speech.iter().find(|&&(s, e)| s < b && b < e).copied();
+        match (cut_a, cut_b) {
+            (None, None) => return (b - a >= st.clip_min_ms).then_some((a, b)),
+            (Some((s, e)), _) => {
+                if s >= scene.0 && b - s <= cap { a = s } else if b - e >= st.clip_min_ms { a = e } else { return None }
+            }
+            (None, Some((s, e))) => {
+                if e <= scene.1 && e - a <= cap { b = e } else if s - a >= st.clip_min_ms { b = s } else { return None }
+            }
+        }
+    }
+    None
+}
+
+/// dHash of the sample frame nearest the window centre (visual "what is on screen").
+fn window_hash(sc: &ScoredScene, a: i64, b: i64) -> Option<String> {
+    let mid = (a + b) / 2;
+    sc.scene.samples.iter().min_by_key(|s| (s.at_ms - mid).abs()).map(|s| s.dhash.clone())
+}
+
 fn candidates(src: &Source, st: &Style) -> Vec<Candidate> {
     let mut out = vec![];
+    let speech: Vec<(i64, i64)> = src.transcript.as_ref().map_or(vec![], |t| t.segments.iter().map(|s| (s.start_ms, s.end_ms)).collect());
     for sc in &src.scenes {
-        for (a, b) in windows(sc.scene.start_ms, sc.scene.end_ms, st) {
-            let tags = src.tags.as_ref().map(|t| tagging::summarize(t, a, b, SCENE_TAG_MIN)).unwrap_or_default();
+        let mut seen = HashSet::new();
+        let fitted = windows(sc.scene.start_ms, sc.scene.end_ms, st)
+            .into_iter()
+            .filter_map(|(a, b)| fit_speech(a, b, &speech, (sc.scene.start_ms, sc.scene.end_ms), st))
+            .filter(|w| seen.insert(*w));
+        for (a, b) in fitted.collect::<Vec<_>>() {
+            let all = src.tags.as_ref().map(|t| tagging::summarize(t, a, b, SCENE_TAG_MIN)).unwrap_or_default();
+            let (bad, tags): (Vec<_>, Vec<_>) = all.into_iter().partition(|t| t.negative);
             let semantic = match (&src.tags, st.favor.is_empty()) {
                 (None, _) => 0.5, // not tagged: neutral
                 (Some(_), true) => tags.first().map_or(0.0, |t| t.score),
@@ -262,21 +313,27 @@ fn candidates(src: &Source, st: &Style) -> Vec<Candidate> {
             });
             let scores = Scores { technical: window_technical(sc, a, b), semantic, speech: speech.min(1.0), favorite: if src.favorite { 1.0 } else { 0.0 } };
             let w = st.weights;
-            let rank = w[0] * scores.technical + w[1] * scores.semantic + w[2] * scores.speech + w[3] * scores.favorite;
+            // Bad shot (finger over the lens, accidental ground shot…): up to −80 %, never chosen as a hook.
+            let bad_score: f64 = bad.iter().map(|t| t.score).sum();
+            let rank = (w[0] * scores.technical + w[1] * scores.semantic + w[2] * scores.speech + w[3] * scores.favorite)
+                * (1.0 - (BAD_SHOT_WEIGHT * bad_score).min(0.8));
             let mut reasons = vec![format!("technical {:.0}", scores.technical * 100.0)];
             if let Some(t) = tags.first() {
                 reasons.push(format!("{} ({:.0}%)", t.vi, t.score * 100.0));
             }
             if scores.speech >= 0.3 {
-                reasons.push(format!("speech {:.0}%", scores.speech * 100.0));
+                reasons.push(format!("speech {:.0}%, sentences kept whole", scores.speech * 100.0));
             }
             if src.favorite {
                 reasons.push("favorite".into());
             }
             reasons.extend(sc.flags.iter().map(|f| f.to_string()));
+            reasons.extend(bad.iter().filter(|t| t.score >= 0.15).map(|t| format!("⚠ {} ({:.0}%)", t.vi, t.score * 100.0)));
             out.push(Candidate {
                 order: (day(&src.media), src.media.id, a),
                 dominant: tags.first().map(|t| t.en.clone()),
+                hash: window_hash(sc, a, b),
+                scene_ms: sc.scene.end_ms - sc.scene.start_ms,
                 duplicates: sc.duplicates.iter().map(|d| (d.media_id, d.scene_index)).collect(),
                 opens: tag_score(&tags, st.open_with),
                 ends: tag_score(&tags, st.end_with),
@@ -310,6 +367,26 @@ fn diversity(c: &Candidate, chosen: &[&Candidate], ideal_ms: i64) -> f64 {
     0.85f64.powi(same_tag) * 0.9f64.powi(same_media.len() as i32) * 0.6f64.powi(near)
 }
 
+/// Same picture (dHash distance ≤ this, of 64 bits) and same main concept = nothing new to show.
+const SAME_PICTURE: u32 = 12;
+/// At most one clip per this much scene length (plus one), so one long shot is not chopped into many parts.
+const SCENE_MS_PER_CLIP: i64 = 60_000;
+
+/// A further clip from an already used scene must show something different, within the per-scene cap.
+fn new_content(c: &Candidate, chosen: &[&Candidate]) -> bool {
+    let same_scene: Vec<_> = chosen.iter().filter(|x| x.clip.media_id == c.clip.media_id && x.clip.scene_index == c.clip.scene_index).collect();
+    if same_scene.len() as i64 >= 1 + c.scene_ms / SCENE_MS_PER_CLIP {
+        return false;
+    }
+    !same_scene.iter().any(|x| {
+        let similar = match (&x.hash, &c.hash) {
+            (Some(h1), Some(h2)) => scoring::hamming(h1, h2).is_some_and(|d| d <= SAME_PICTURE),
+            _ => false, // no frames to compare: only the per-scene cap applies
+        };
+        similar && x.dominant == c.dominant
+    })
+}
+
 /// Distance (ms) from `c` to the nearest chosen clip of the same file; MAX when none.
 fn distance(c: &Candidate, chosen: &[&Candidate]) -> i64 {
     chosen
@@ -318,6 +395,29 @@ fn distance(c: &Candidate, chosen: &[&Candidate]) -> i64 {
         .map(|x| (x.clip.in_ms + x.clip.out_ms - c.clip.in_ms - c.clip.out_ms).abs() / 2)
         .min()
         .unwrap_or(i64::MAX)
+}
+
+/// Consecutive clips of one file with ≤ MERGE_GAP_MS between them play as one continuous clip (no jump cut).
+const MERGE_GAP_MS: i64 = 1_500;
+
+fn merge_near(clips: Vec<PlanClip>) -> Vec<PlanClip> {
+    let mut out: Vec<PlanClip> = vec![];
+    for c in clips {
+        if let Some(last) = out.last_mut()
+            && last.media_id == c.media_id
+            && c.in_ms >= last.out_ms
+            && c.in_ms - last.out_ms <= MERGE_GAP_MS
+        {
+            last.out_ms = c.out_ms;
+            last.rank = last.rank.max(c.rank);
+            if !last.reasons.iter().any(|r| r == "merged") {
+                last.reasons.push("merged".into());
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 pub fn plan(st: &Style, sources: &[Source]) -> Plan {
@@ -347,6 +447,7 @@ pub fn plan(st: &Style, sources: &[Source]) -> Plan {
             .iter()
             .filter(|c| !chosen.iter().any(|x| x.clip.media_id == c.clip.media_id && overlap(x.clip.in_ms, x.clip.out_ms, c.clip.in_ms, c.clip.out_ms) > 0))
             .filter(|c| !c.duplicates.iter().any(|d| used.contains(d)))
+            .filter(|c| new_content(c, &chosen))
             .map(|c| (c, c.clip.rank * diversity(c, &chosen, st.clip_ideal_ms), distance(c, &chosen)))
             // Ties: farthest from the clips already taken from that file (even coverage), then time order.
             .max_by(|(a, ra, da), (b, rb, db)| ra.total_cmp(rb).then(da.cmp(db)).then(b.order.cmp(&a.order)));
@@ -367,7 +468,11 @@ pub fn plan(st: &Style, sources: &[Source]) -> Plan {
             chosen.insert(0, c);
         }
     } else if st.opening.starts_with("Strongest") && !chosen.is_empty() {
-        let i = (0..chosen.len()).max_by(|&a, &b| chosen[a].clip.rank.total_cmp(&chosen[b].clip.rank)).unwrap();
+        // Hook = best clip without bad-shot warnings (a hook must be instantly readable).
+        let clean = |c: &Candidate| !c.clip.reasons.iter().any(|r| r.starts_with('⚠'));
+        let i = (0..chosen.len())
+            .max_by(|&a, &b| (clean(chosen[a]), chosen[a].clip.rank).partial_cmp(&(clean(chosen[b]), chosen[b].clip.rank)).unwrap())
+            .unwrap();
         let c = chosen.remove(i);
         chosen.insert(0, c);
     }
@@ -378,8 +483,9 @@ pub fn plan(st: &Style, sources: &[Source]) -> Plan {
         }
     }
 
-    let clips: Vec<PlanClip> = chosen.into_iter().map(|c| c.clip.clone()).collect();
+    let clips = merge_near(chosen.into_iter().map(|c| c.clip.clone()).collect());
     let n = clips.len() as i64;
+    let suggested_title = suggest_title(&clips, sources);
     Plan {
         style: st.id.into(),
         target_ms: st.target_ms,
@@ -389,7 +495,60 @@ pub fn plan(st: &Style, sources: &[Source]) -> Plan {
         clips,
         skipped,
         candidates,
+        suggested_title,
     }
+}
+
+/// "Xe đạp · 20/02/2026" or "Biển · 02/2026 – 05/2026": most frequent main concept + date range.
+fn suggest_title(clips: &[PlanClip], sources: &[Source]) -> String {
+    let mut counts: Vec<(String, usize)> = vec![];
+    for t in clips.iter().filter_map(|c| c.tags.first()) {
+        match counts.iter_mut().find(|(n, _)| n == t) {
+            Some(e) => e.1 += 1,
+            None => counts.push((t.clone(), 1)),
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut days: Vec<String> = clips
+        .iter()
+        .filter_map(|c| sources.iter().find(|s| s.media.id == c.media_id).map(|s| day(&s.media)))
+        .filter(|d| d.len() == 10)
+        .collect();
+    days.sort();
+    let fmt = |d: &str| format!("{}/{}/{}", &d[8..10], &d[5..7], &d[..4]);
+    let month = |d: &str| format!("{}/{}", &d[5..7], &d[..4]);
+    let dates = match (days.first(), days.last()) {
+        (Some(a), Some(b)) if a == b => fmt(a),
+        (Some(a), Some(b)) if a[..7] == b[..7] => format!("{} – {}", &fmt(a)[..2], fmt(b)),
+        (Some(a), Some(b)) => format!("{} – {}", month(a), month(b)),
+        _ => String::new(),
+    };
+    let concept = counts.first().map(|(t, _)| {
+        let mut c = t.chars();
+        c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+    });
+    match (concept, dates.is_empty()) {
+        (Some(c), false) => format!("{c} · {dates}"),
+        (Some(c), true) => c,
+        (None, false) => dates,
+        (None, true) => String::new(),
+    }
+}
+
+/// Export options after applying a plan: the style's look, existing music/titles kept, the suggested
+/// title used only when the user has none.
+pub fn styled_options(mut o: crate::export::Options, st: &Style, p: &Plan) -> crate::export::Options {
+    o.fill = st.export_preset == "reels";
+    o.transition_ms = st.transition_ms;
+    o.transition = st.transition.into();
+    o.color = st.color.into();
+    o.fade = true;
+    o.normalize = true;
+    o.titles.captions = st.captions;
+    if o.titles.title.trim().is_empty() {
+        o.titles.title = p.suggested_title.clone();
+    }
+    o
 }
 
 // ------------------------------------------------------------------ storage
@@ -458,7 +617,7 @@ mod tests {
     fn tags(per_2s: &[usize], probs: f64) -> MediaTags {
         MediaTags {
             device: "CPU".into(),
-            tags: [("sea", "biển"), ("people", "con người"), ("bicycle", "xe đạp")].iter().map(|(e, v)| TagName { en: (*e).into(), vi: (*v).into() }).collect(),
+            tags: [("sea", "biển"), ("people", "con người"), ("bicycle", "xe đạp")].iter().map(|(e, v)| TagName { en: (*e).into(), vi: (*v).into(), negative: false }).collect(),
             samples: per_2s.iter().enumerate().map(|(i, &k)| TagSample { at_ms: i as i64 * 2000, tags: vec![(k, probs)] }).collect(),
         }
     }
@@ -486,7 +645,7 @@ mod tests {
             src(media(4, "2026-02-23", 10_000), vec![]),
         ];
         let p = plan(&st, &sources);
-        assert!(p.total_ms <= st.target_ms && p.total_ms > st.target_ms - st.clip_max_ms, "total {}", p.total_ms);
+        assert!(p.total_ms <= st.target_ms && p.clips.len() == 12, "per-scene cap (6 + 6) before the 60 s target: {} ms, {} clips", p.total_ms, p.clips.len());
         assert!(p.clips.iter().all(|c| c.media_id != 3), "excluded file never used");
         assert!(p.clips.iter().all(|c| (st.clip_min_ms..=st.clip_max_ms).contains(&(c.out_ms - c.in_ms))));
         assert!(p.skipped.iter().any(|s| s.contains("v3.mp4: excluded")) && p.skipped.iter().any(|s| s.contains("v4.mp4: not analysed")));
@@ -520,10 +679,72 @@ mod tests {
     fn long_single_shot_is_sampled_spread_out() {
         let st = style("clean_minimal").unwrap(); // 60 s from one 300 s continuous shot
         let p = plan(&st, &[src(media(1, "2026-02-20", 300_000), vec![scene(1, 0, 0, 300_000, 0.8)])]);
-        assert!(p.clips.len() >= 12, "{}", p.clips.len());
+        assert_eq!(p.clips.len(), 6, "capped at 1 + 300/60 clips for one shot");
         assert!(p.clips.windows(2).all(|w| w[1].in_ms - w[0].out_ms >= 2 * st.clip_ideal_ms), "no consecutive windows: {:?}",
             p.clips.iter().map(|c| c.in_ms / 1000).collect::<Vec<_>>());
         assert!(p.clips.last().unwrap().out_ms > 240_000, "covers the whole shot");
+    }
+
+    #[test]
+    fn speech_is_never_cut_mid_sentence() {
+        let st = style("clean_minimal").unwrap(); // 3–5 s, cap 15 s
+        let speech = [(3_000, 6_000), (20_000, 45_000)];
+        assert_eq!(fit_speech(0, 4_000, &speech, (0, 60_000), &st), Some((0, 6_000)), "extended to the end of the sentence");
+        assert_eq!(fit_speech(4_000, 8_000, &speech, (0, 60_000), &st), Some((3_000, 8_000)), "extended back to its start");
+        assert_eq!(fit_speech(24_000, 28_000, &speech, (0, 60_000), &st), None, "25 s speech cannot fit: dropped, not cut");
+        assert_eq!(fit_speech(16_000, 22_000, &speech, (0, 60_000), &st), Some((16_000, 20_000)), "talk too long to include: ends before it");
+        assert_eq!(fit_speech(18_000, 22_000, &speech, (0, 60_000), &st), None, "shrinking would go below the minimum");
+        assert_eq!(fit_speech(12_000, 25_000, &speech, (0, 60_000), &st), Some((12_000, 20_000)), "shrunk to exclude the long talk");
+        assert_eq!(fit_speech(4_000, 8_000, &speech, (4_000, 60_000), &st), None, "sentence starts before the scene and cannot be excluded");
+    }
+
+    #[test]
+    fn one_unchanging_shot_is_not_chopped() {
+        let st = style("clean_minimal").unwrap();
+        // 120 s shot, same picture and tags throughout → at most 1 + 120/60 = 3 clips, and only if different.
+        let mut sc = scene(1, 0, 0, 120_000, 0.8);
+        sc.scene.samples = (0..60).map(|i| Sample { at_ms: i * 2000, sharpness: 300.0, brightness: 0.5, contrast: 0.2, clip_low: 0.0,
+            clip_high: 0.0, black: false, dhash: "00ff00ff00ff00ff".into() }).collect();
+        let p = plan(&st, &[src(media(1, "2026-02-20", 120_000), vec![sc])]);
+        assert_eq!(p.clips.len(), 1, "identical content: one clip, not {}", p.clips.len());
+    }
+
+    #[test]
+    fn near_clips_merge() {
+        let c = |a: i64, b: i64, m: i64| PlanClip { media_id: m, scene_index: 0, in_ms: a, out_ms: b, scores: Scores { technical: 1.0, semantic: 1.0, speech: 0.0, favorite: 0.0 },
+            rank: 0.5, tags: vec![], reasons: vec![] };
+        let merged = merge_near(vec![c(0, 4_000, 1), c(5_000, 9_000, 1), c(20_000, 24_000, 1), c(24_500, 26_000, 2)]);
+        assert_eq!(merged.iter().map(|x| (x.media_id, x.in_ms, x.out_ms)).collect::<Vec<_>>(), [(1, 0, 9_000), (1, 20_000, 24_000), (2, 24_500, 26_000)]);
+    }
+
+    #[test]
+    fn title_suggestion_and_style_look() {
+        let st = style("memory_nostalgia").unwrap();
+        let mut a = src(media(1, "2026-02-20", 16_000), vec![scene(1, 0, 0, 16_000, 0.7)]);
+        a.tags = Some(tags(&[2; 8], 0.9));
+        let b = src(media(2, "2026-02-27", 9_000), vec![scene(2, 0, 0, 9_000, 0.7)]);
+        let p = plan(&st, &[a, b]);
+        assert_eq!(p.suggested_title, "Xe đạp · 20 – 27/02/2026");
+        let o = styled_options(crate::export::Options { titles: crate::export::Titles { title: "Của tôi".into(), ..Default::default() }, ..Default::default() }, &st, &p);
+        assert_eq!((o.color.as_str(), o.transition_ms, o.fade, o.fill, o.titles.title.as_str()), ("warm", 800, true, false, "Của tôi"), "user title kept");
+        assert!(styles().iter().all(|s| crate::export::TRANSITIONS.contains(&s.transition) && crate::export::COLORS.contains(&s.color)));
+    }
+
+    #[test]
+    fn bad_shots_are_penalised_and_never_the_hook() {
+        let st = style("social_story").unwrap();
+        let mut t = tags(&[1, 1, 1, 1, 1, 1], 0.6);
+        t.tags.push(TagName { en: "finger over the lens".into(), vi: "ngón tay che ống kính".into(), negative: true });
+        for s in t.samples.iter_mut().filter(|s| s.at_ms < 4_000) {
+            s.tags.push((3, 0.5)); // finger over the lens in the first 4 s
+        }
+        let mut a = src(media(1, "2026-02-20", 12_000), vec![scene(1, 0, 0, 12_000, 0.9)]);
+        a.tags = Some(t);
+        let p = plan(&st, &[a]);
+        let bad = p.clips.iter().find(|c| c.in_ms < 4_000);
+        assert!(bad.is_none_or(|c| c.reasons.iter().any(|r| r.starts_with("⚠ ngón tay"))), "flagged when used");
+        assert!(p.clips[0].in_ms >= 4_000, "hook is a clean shot: {:?}", p.clips.iter().map(|c| (c.in_ms, c.reasons.clone())).collect::<Vec<_>>());
+        assert!(p.clips.iter().all(|c| !c.tags.iter().any(|t| t.contains("ngón tay"))), "bad shots are not content tags");
     }
 
     #[test]
