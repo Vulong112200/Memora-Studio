@@ -1,5 +1,6 @@
 mod analysis;
 mod db;
+mod editing;
 mod export;
 mod hardware;
 mod jobs;
@@ -11,7 +12,9 @@ mod projects;
 mod proxy;
 mod scoring;
 mod settings;
+mod tagging;
 mod timeline;
+mod transcribe;
 mod worker;
 
 use rusqlite::Connection;
@@ -24,7 +27,7 @@ use tauri::{Emitter, Manager, State};
 const NO_DATA_ROOT: &str = "Choose a data folder first.";
 /// Job kinds the UI may start. `diagnostic.*` kinds exist for tests only.
 const UI_JOB_KINDS: &[&str] =
-    &["validate_devices", "media.import", "media.proxy", "media.export", "media.analyze", "models.install"];
+    &["validate_devices", "media.import", "media.proxy", "media.export", "media.analyze", "media.transcribe", "media.tag", "models.install"];
 
 /// `<data root>\cache`: thumbnails and proxies. The only folder the webview may load files from.
 fn cache_dir(state: &AppState) -> Option<PathBuf> {
@@ -143,19 +146,69 @@ fn delete_project(id: i64, state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn list_media(state: State<'_, AppState>) -> Result<Vec<media::Media>, String> {
-    let (mut items, counts) = with_db(&state, |c| Ok((media::list(c)?, analysis::scene_counts(c)?)))?;
+    let (mut items, counts, transcribed, tags, marks) = with_db(&state, |c| {
+        Ok((media::list(c)?, analysis::scene_counts(c)?, transcribe::transcribed(c)?, tagging::all(c)?, editing::marks(c)?))
+    })?;
     if let Some(cache) = cache_dir(&state) {
         proxy::attach_cache(&cache, &mut items);
     }
     for m in &mut items {
         m.scene_count = counts.get(&m.id).copied();
+        m.transcribed = transcribed.contains(&m.id);
+        m.tags = tags.get(&m.id).map(|t| tagging::summarize(t, 0, i64::MAX, 0.05));
+        m.mark = marks.get(&m.id).copied().unwrap_or_default();
     }
     Ok(items)
 }
 
 #[tauri::command]
 fn list_scenes(media_id: i64, state: State<'_, AppState>) -> Result<Vec<scoring::ScoredScene>, String> {
-    with_db(&state, |c| Ok(scoring::score(analysis::scenes(c, media_id)?, &analysis::library_hashes(c)?)))
+    with_db(&state, |c| {
+        let mut scenes = scoring::score(analysis::scenes(c, media_id)?, &analysis::library_hashes(c)?);
+        if let Some(t) = tagging::get(c, media_id)? {
+            for s in &mut scenes {
+                s.tags = tagging::summarize(&t, s.scene.start_ms, s.scene.end_ms, 0.1);
+            }
+        }
+        Ok(scenes)
+    })
+}
+
+#[tauri::command]
+fn get_transcript(media_id: i64, state: State<'_, AppState>) -> Result<Option<transcribe::Transcript>, String> {
+    with_db(&state, |c| transcribe::get(c, media_id))
+}
+
+#[tauri::command]
+fn set_media_mark(media_id: i64, mark: editing::Mark, state: State<'_, AppState>) -> Result<(), String> {
+    with_db(&state, |c| editing::set_mark(c, media_id, mark))
+}
+
+#[tauri::command]
+fn list_styles() -> Vec<editing::Style> {
+    editing::styles()
+}
+
+/// Smart mode: builds and stores an Editing Plan for review. `from`/`to` = recording dates YYYY-MM-DD.
+#[tauri::command]
+fn generate_plan(project_id: i64, style: String, from: Option<String>, to: Option<String>, state: State<'_, AppState>) -> Result<editing::Plan, String> {
+    let st = editing::style(&style)?;
+    with_db(&state, |c| {
+        let plan = editing::plan(&st, &editing::gather(c, from.as_deref(), to.as_deref())?);
+        editing::save(c, project_id, &plan)?;
+        tracing::info!(project_id, style, clips = plan.clips.len(), total_ms = plan.total_ms, "editing plan generated");
+        Ok(plan)
+    })
+}
+
+#[tauri::command]
+fn get_plan(project_id: i64, state: State<'_, AppState>) -> Result<Option<editing::Plan>, String> {
+    with_db(&state, |c| editing::load(c, project_id))
+}
+
+#[tauri::command]
+fn apply_plan(project_id: i64, keep: Vec<usize>, state: State<'_, AppState>) -> Result<usize, String> {
+    with_db(&state, |c| editing::apply(c, project_id, &keep))
 }
 
 #[tauri::command]
@@ -272,6 +325,8 @@ pub fn run() {
                     "media.proxy" => proxy::proxy_job(job, progress, cancelled, &env),
                     "media.export" => export::export_job(job, progress, cancelled, &env, &root.join("projects")),
                     "media.analyze" => analysis::analyze_job(job, progress, cancelled, &env, &mut ai),
+                    "media.tag" => tagging::tag_job(job, progress, cancelled, &env, &mut ai),
+                    "media.transcribe" => transcribe::transcribe_job(job, progress, cancelled, &env, &root),
                     k => jobs::Outcome::Failed(format!("Unknown job kind: {k}")),
                 }
             });
@@ -305,6 +360,12 @@ pub fn run() {
             list_media,
             remove_media,
             list_scenes,
+            get_transcript,
+            set_media_mark,
+            list_styles,
+            generate_plan,
+            get_plan,
+            apply_plan,
             list_models,
             remove_model,
             list_clips,

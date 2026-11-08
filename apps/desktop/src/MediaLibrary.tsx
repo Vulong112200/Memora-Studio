@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  addClip, cancelJob, formatBytes, listMedia, listScenes, onJobUpdated, removeMedia, submitJob,
-  type Job, type Media, type Project, type ScoredScene,
+  addClip, cancelJob, formatBytes, getTranscript, listMedia, setMediaMark, listScenes, onJobUpdated, removeMedia, submitJob,
+  type Job, type Media, type Project, type ScoredScene, type TagScore, type Transcript,
 } from "./api";
 import { clock } from "./Timeline";
 
@@ -12,10 +12,28 @@ const VIDEO_EXTENSIONS = ["mp4", "mov", "m4v", "mkv", "avi", "mts", "m2ts", "3gp
 const linkClass = "text-xs text-zinc-500 hover:underline";
 const buttonClass =
   "rounded-md bg-zinc-900 px-4 py-1.5 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900";
-/** Progress units per file in media.proxy / media.analyze jobs (src-tauri). */
+/** Progress units per file in media.proxy / media.analyze / media.transcribe jobs (src-tauri). */
 const STEP = 1000;
 /** Background jobs that work through a list of media ids. */
-const BACKGROUND = new Set(["media.proxy", "media.analyze"]);
+const BACKGROUND = new Set(["media.proxy", "media.analyze", "media.transcribe", "media.tag"]);
+const JOB_LABEL: Record<string, string> = {
+  "media.proxy": "Creating preview proxies…",
+  "media.analyze": "Analysing scenes and image quality…",
+  "media.transcribe": "Transcribing speech (whisper.cpp, on this computer)…",
+  "media.tag": "Recognising visual concepts (OpenCLIP, on this computer)…",
+};
+
+/** Lower case without Vietnamese diacritics, so "xe dap" finds "xe đạp". */
+const fold = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").replace(/Đ/g, "d").toLowerCase();
+
+function matches(m: Media, q: string) {
+  const f = fold(q.trim());
+  if (!f) return true;
+  return fold(m.path).includes(f) || (m.tags ?? []).some((t) => t.score >= 0.1 && (fold(t.vi).includes(f) || t.en.includes(f)));
+}
+
+const topTags = (tags: TagScore[] | null, n: number, min: number) =>
+  (tags ?? []).filter((t) => t.score >= min).slice(0, n).map((t) => t.vi).join(", ");
 
 interface ImportResult { imported: number; ids: number[]; failed: { path: string; error: string }[] }
 interface BatchResult { failed: { id: number; error: string }[] }
@@ -33,16 +51,26 @@ function resolution(m: Media) {
   return m.rotation % 180 === 0 ? `${m.width}×${m.height}` : `${m.height}×${m.width}`;
 }
 
+/** "working 40%" / "waiting" while a `kinds` job still has to process `m`, else null. */
+function working(m: Media, job: Job | null, kinds: string[], finished: boolean) {
+  if (!active(job) || !kinds.includes(job!.kind) || finished) return null;
+  const i = ((job!.params as { ids?: number[] } | null)?.ids ?? []).indexOf(m.id);
+  if (i < 0) return null;
+  const pct = Math.round(((job!.done - i * STEP) / STEP) * 100);
+  return pct > 0 && pct < 100 ? `working ${pct}%` : "waiting";
+}
+
 /** Analysis state of one clip while `job` may be working on it. */
 function status(m: Media, job: Job | null) {
-  const ids = (job?.params as { ids?: number[] } | null)?.ids ?? [];
-  const i = ids.indexOf(m.id);
-  if (active(job) && i >= 0 && m.sceneCount === null) {
-    const pct = Math.round(((job!.done - i * STEP) / STEP) * 100);
-    return pct > 0 && pct < 100 ? `working ${pct}%` : "waiting";
-  }
+  const w = working(m, job, ["media.proxy", "media.analyze"], m.sceneCount !== null);
+  if (w) return w;
   if (m.sceneCount !== null) return `${m.sceneCount} scene${m.sceneCount === 1 ? "" : "s"}`;
   return m.proxy ? "not analysed" : "–";
+}
+
+function speech(m: Media, job: Job | null) {
+  if (m.audioStreams === 0) return "no audio";
+  return working(m, job, ["media.transcribe"], false) ?? (m.transcribed ? "transcribed" : "–");
 }
 
 const pct = (x: number) => `${Math.round(x * 100)}`;
@@ -58,6 +86,7 @@ function SceneCard({ s, onPick }: { s: ScoredScene; onPick: () => void }) {
         <span className="font-mono">{clock(s.startMs)}–{clock(s.endMs)}</span>
         <span className={`font-semibold ${tone}`}>{pct(t.total)}</span>
       </div>
+      {s.tags.length > 0 && <div className="mt-0.5 truncate text-sky-300">{topTags(s.tags, 3, 0.1)}</div>}
       {s.flags.length > 0 && <div className="mt-0.5 truncate text-amber-400">{s.flags.join(" · ")}</div>}
     </button>
   );
@@ -68,6 +97,7 @@ function Preview({ m, project, onClipAdded }: { m: Media; project: Project | nul
   const [inMs, setIn] = useState(0);
   const [outMs, setOut] = useState(m.durationMs);
   const [scenes, setScenes] = useState<ScoredScene[]>([]);
+  const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const now = () => Math.round((video.current?.currentTime ?? 0) * 1000);
 
@@ -75,7 +105,11 @@ function Preview({ m, project, onClipAdded }: { m: Media; project: Project | nul
     if (m.sceneCount !== null) listScenes(m.id).then(setScenes).catch((e) => setMessage(String(e)));
   }, [m.id, m.sceneCount]);
 
-  function pick(s: ScoredScene) {
+  useEffect(() => {
+    if (m.transcribed) getTranscript(m.id).then(setTranscript).catch((e) => setMessage(String(e)));
+  }, [m.id, m.transcribed]);
+
+  function pick(s: { startMs: number; endMs: number }) {
     setIn(s.startMs);
     setOut(s.endMs);
     if (video.current) video.current.currentTime = s.startMs / 1000;
@@ -115,6 +149,25 @@ function Preview({ m, project, onClipAdded }: { m: Media; project: Project | nul
           </div>
         </div>
       )}
+      {transcript && (
+        <div className="px-3 pb-2 text-xs text-zinc-300">
+          <p className="mb-1 text-zinc-500">
+            Speech · {transcript.modelId}{transcript.language ? ` · language ${transcript.language}` : ""} · machine transcription, may
+            contain mistakes or text invented from background noise. Click a line to select it.
+          </p>
+          {transcript.segments.length === 0 ? (
+            <p className="text-zinc-500">No speech found.</p>
+          ) : (
+            <div className="max-h-40 overflow-y-auto">
+              {transcript.segments.map((s, i) => (
+                <button key={i} className="block w-full rounded px-1 text-left hover:bg-zinc-800" onClick={() => pick(s)}>
+                  <span className="mr-2 font-mono text-zinc-500">{clock(s.startMs)}</span>{s.text}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       {m.proxy && (
         <div className="flex flex-wrap items-center gap-2 px-3 pb-2 text-xs text-zinc-300">
           <button className="rounded border border-zinc-600 px-2 py-0.5 hover:bg-zinc-800" onClick={() => setIn(now())}>Set In</button>
@@ -137,15 +190,17 @@ function Preview({ m, project, onClipAdded }: { m: Media; project: Project | nul
   );
 }
 
-function MediaRow({ m, job, selected, onSelect, onRemoved, onError }: {
+function MediaRow({ m, job, selected, onSelect, onRemoved, onError, onChanged }: {
   m: Media;
   job: Job | null;
   selected: boolean;
   onSelect: () => void;
   onRemoved: () => void;
   onError: (e: string) => void;
+  onChanged: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
+  const mark = (change: Partial<typeof m.mark>) => setMediaMark(m.id, { ...m.mark, ...change }).then(onChanged).catch((e) => onError(String(e)));
   const recorded = m.sourceCreatedAt ? new Date(m.sourceCreatedAt) : null;
   return (
     <tr
@@ -166,7 +221,15 @@ function MediaRow({ m, job, selected, onSelect, onRemoved, onError }: {
       <td>{m.videoCodec}{m.audioCodec ? ` / ${m.audioCodec}` : " / no audio"}</td>
       <td className="text-right">{formatBytes(m.size)}</td>
       <td className="pl-3 text-xs text-zinc-500">{status(m, job)}</td>
+      <td className="pl-3 text-xs text-zinc-500">{speech(m, job)}</td>
+      <td className="max-w-40 truncate pl-3 text-xs text-zinc-500" title={topTags(m.tags, 8, 0.05)}>
+        {working(m, job, ["media.tag"], false) ?? (m.tags ? topTags(m.tags, 3, 0.05) || "–" : "–")}
+      </td>
       <td className="pl-3 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+        <button className={`mr-2 text-sm ${m.mark.favorite ? "text-amber-500" : "text-zinc-400 hover:text-amber-500"}`} aria-pressed={m.mark.favorite}
+          onClick={() => mark({ favorite: !m.mark.favorite })} title="Favorite: preferred by Smart edit">★</button>
+        <button className={`mr-2 text-xs ${m.mark.excluded ? "text-red-600" : "text-zinc-400 hover:text-red-600"}`} aria-pressed={m.mark.excluded}
+          onClick={() => mark({ excluded: !m.mark.excluded })} title="Exclude: never used by Smart edit">{m.mark.excluded ? "excluded" : "⊘"}</button>
         {confirming ? (
           <>
             <button className="text-xs text-red-600 hover:underline" onClick={() => removeMedia(m.id).then(onRemoved).catch((e) => onError(String(e)))}>
@@ -190,6 +253,8 @@ export default function MediaLibrary({ project, onClipAdded }: { project: Projec
   const [job, setJob] = useState<Job | null>(null); // latest proxy / analysis job
   const [selected, setSelected] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [speechModel, setSpeechModel] = useState("whisper-small");
+  const [query, setQuery] = useState("");
 
   const load = useCallback(() => {
     listMedia().then(setMedia).catch((e) => setError(String(e)));
@@ -230,6 +295,11 @@ export default function MediaLibrary({ project, onClipAdded }: { project: Projec
   const importResult = importJob?.status === "completed" ? (importJob.result as ImportResult) : null;
   const jobResult = job?.status === "completed" ? (job.result as BatchResult) : null;
   const notAnalysed = media?.filter((m) => m.sceneCount === null).map((m) => m.id) ?? [];
+  const notTagged = media?.filter((m) => m.tags === null).map((m) => m.id) ?? [];
+  const shown = media?.filter((m) => matches(m, query)) ?? [];
+  const notTranscribed = media?.filter((m) => m.audioStreams > 0 && !m.transcribed).map((m) => m.id) ?? [];
+  const transcribe = (ids: number[]) =>
+    submitJob("media.transcribe", { ids, model: speechModel, language: "auto" }).then(setJob).catch((e) => setError(String(e)));
   const current = media?.find((m) => m.id === selected);
 
   return (
@@ -241,6 +311,24 @@ export default function MediaLibrary({ project, onClipAdded }: { project: Projec
             <button className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm dark:border-zinc-700" onClick={() => analyze(notAnalysed)}>
               Analyze {notAnalysed.length} video{notAnalysed.length === 1 ? "" : "s"}
             </button>
+          )}
+          {notTagged.length > 0 && !active(job) && (
+            <button className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm dark:border-zinc-700"
+              onClick={() => submitJob("media.tag", { ids: notTagged }).then(setJob).catch((e) => setError(String(e)))}>
+              Tag {notTagged.length} video{notTagged.length === 1 ? "" : "s"}
+            </button>
+          )}
+          {notTranscribed.length > 0 && !active(job) && (
+            <>
+              <select className="rounded-md border border-zinc-300 bg-transparent px-2 text-sm dark:border-zinc-700" value={speechModel}
+                onChange={(e) => setSpeechModel(e.target.value)} aria-label="Speech model" title="Speech model (install it in AI models first)">
+                <option value="whisper-base">Whisper base (faster)</option>
+                <option value="whisper-small">Whisper small (more accurate)</option>
+              </select>
+              <button className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm dark:border-zinc-700" onClick={() => transcribe(notTranscribed)}>
+                Transcribe {notTranscribed.length} video{notTranscribed.length === 1 ? "" : "s"}
+              </button>
+            </>
           )}
           <button className={buttonClass} disabled={active(importJob)} onClick={addVideos}>Add videos</button>
         </div>
@@ -257,7 +345,7 @@ export default function MediaLibrary({ project, onClipAdded }: { project: Projec
       )}
       {active(job) && (
         <p className="mt-2 text-sm text-zinc-500">
-          {job!.kind === "media.analyze" ? "Analysing scenes and image quality…" : "Creating preview proxies…"}{" "}
+          {JOB_LABEL[job!.kind]}{" "}
           {job!.total > 0 && `${Math.round((job!.done / job!.total) * 100)}%`}{" "}
           <button className={linkClass} onClick={() => cancelJob(job!.id).catch((e) => setError(String(e)))}>Cancel</button>
         </p>
@@ -279,15 +367,22 @@ export default function MediaLibrary({ project, onClipAdded }: { project: Projec
       {current && <Preview key={current.id} m={current} project={project} onClipAdded={onClipAdded} />}
       {media?.length === 0 && <p className="mt-3 text-sm text-zinc-500">No videos yet.</p>}
       {media && media.length > 0 && (
+        <input className="mt-3 w-full rounded-md border border-zinc-300 bg-transparent px-3 py-1.5 text-sm dark:border-zinc-700"
+          placeholder="Search by file name or visual concept (xe đạp, beach, hoàng hôn…)" value={query}
+          onChange={(e) => setQuery(e.target.value)} aria-label="Search media" />
+      )}
+      {media && media.length > 0 && shown.length === 0 && <p className="mt-2 text-sm text-zinc-500">No match.</p>}
+      {shown.length > 0 && (
+        <div className="overflow-x-auto">
         <table className="mt-3 w-full text-sm">
           <thead className="text-left text-xs text-zinc-500">
             <tr>
               <th /><th className="py-1">File</th><th>Recorded</th><th>Length</th><th>Resolution</th><th>Codec</th>
-              <th className="text-right">Size</th><th className="pl-3">Analysis</th><th />
+              <th className="text-right">Size</th><th className="pl-3">Analysis</th><th className="pl-3">Speech</th><th className="pl-3">Concepts</th><th />
             </tr>
           </thead>
           <tbody>
-            {media.map((m) => (
+            {shown.map((m) => (
               <MediaRow
                 key={m.id}
                 m={m}
@@ -296,10 +391,12 @@ export default function MediaLibrary({ project, onClipAdded }: { project: Projec
                 onSelect={() => setSelected(m.id === selected ? null : m.id)}
                 onRemoved={() => { if (m.id === selected) setSelected(null); load(); }}
                 onError={setError}
+                onChanged={load}
               />
             ))}
           </tbody>
         </table>
+        </div>
       )}
     </section>
   );

@@ -50,6 +50,29 @@ pub struct Segment {
     pub out_ms: i64,
 }
 
+/// How clips are framed and joined (editing styles, docs/Production.md §6.3).
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct Look {
+    /// true: scale to cover the frame and centre-crop (vertical presets); false: letterbox, nothing cropped.
+    pub fill: bool,
+    /// Crossfade length between clips; 0 = hard cuts.
+    pub transition_ms: i64,
+}
+
+impl Look {
+    /// Crossfade actually used: never longer than half of the shortest clip.
+    // ponytail: centre crop only; subject-aware (smart) crop needs detections we do not have yet.
+    pub fn transition(&self, segs: &[Segment]) -> i64 {
+        let shortest = segs.iter().map(|s| s.out_ms - s.in_ms).min().unwrap_or(0);
+        if segs.len() < 2 { 0 } else { self.transition_ms.clamp(0, shortest / 2) }
+    }
+
+    /// Output duration: clip lengths minus the crossfade overlaps.
+    pub fn duration(&self, segs: &[Segment]) -> i64 {
+        segs.iter().map(|s| s.out_ms - s.in_ms).sum::<i64>() - (segs.len() as i64 - 1).max(0) * self.transition(segs)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Encoder {
     Qsv,
@@ -60,14 +83,20 @@ fn secs(ms: i64) -> String {
     format!("{:.3}", ms as f64 / 1000.0)
 }
 
-/// FFmpeg arguments (without the output path) that trim, normalize and concatenate `segs`.
-/// Every segment is fitted inside the frame (letterboxed, nothing cropped) and gets a stereo 48 kHz
-/// audio track (silence when the source has none) so concat always lines up.
-pub fn build_args(segs: &[Segment], decode: Decode, encoder: Encoder, (w, h, fps): (i64, i64, f64)) -> Vec<OsString> {
+/// FFmpeg arguments (without the output path) that trim, normalize and join `segs`.
+/// Every segment is letterboxed (or centre-cropped with `look.fill`) and gets a stereo 48 kHz audio
+/// track (silence when the source has none) so joins always line up. Joins are hard cuts (concat) or
+/// crossfades (xfade + acrossfade) per `look`.
+pub fn build_args(segs: &[Segment], decode: Decode, encoder: Encoder, (w, h, fps): (i64, i64, f64), look: Look) -> Vec<OsString> {
     let mut args = vec![];
     let mut graph = String::new();
     let mut input = 0;
     let pix = if encoder == Encoder::Qsv { "nv12" } else { "yuv420p" };
+    let frame = if look.fill {
+        format!("scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}")
+    } else {
+        format!("scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2")
+    };
     for (i, s) in segs.iter().enumerate() {
         let dur = secs(s.out_ms - s.in_ms);
         args.extend(decode.input_args());
@@ -83,15 +112,33 @@ pub fn build_args(segs: &[Segment], decode: Decode, encoder: Encoder, (w, h, fps
             format!("{}:a:0", input - 1)
         };
         graph.push_str(&format!(
-            "[{v}:v:0]{up}scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},format={pix}[v{i}];\
+            "[{v}:v:0]{up}{frame},setsar=1,fps={fps},format={pix}[v{i}];\
              [{a}]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}];",
             up = decode.upright(s.media.probe.rotation),
         ));
     }
-    for i in 0..segs.len() {
-        graph.push_str(&format!("[v{i}][a{i}]"));
+    let d = look.transition(segs);
+    if d == 0 {
+        for i in 0..segs.len() {
+            graph.push_str(&format!("[v{i}][a{i}]"));
+        }
+        graph.push_str(&format!("concat=n={}:v=1:a=1[v][a]", segs.len()));
+    } else {
+        // Chain: each xfade starts d before the end of everything joined so far.
+        let (mut v, mut a, mut offset) = ("v0".to_string(), "a0".to_string(), 0);
+        for i in 1..segs.len() {
+            offset += segs[i - 1].out_ms - segs[i - 1].in_ms - d;
+            let last = i == segs.len() - 1;
+            let (nv, na) = if last { ("v".to_string(), "a".to_string()) } else { (format!("x{i}"), format!("y{i}")) };
+            graph.push_str(&format!(
+                "[{v}][v{i}]xfade=transition=fade:duration={dur}:offset={off}[{nv}];[{a}][a{i}]acrossfade=d={dur}[{na}];",
+                dur = secs(d),
+                off = secs(offset),
+            ));
+            (v, a) = (nv, na);
+        }
+        graph.pop(); // trailing ';'
     }
-    graph.push_str(&format!("concat=n={}:v=1:a=1[v][a]", segs.len()));
     args.extend(os(&["-filter_complex", &graph, "-map", "[v]", "-map", "[a]"]));
     args.extend(os(match encoder {
         Encoder::Qsv => &["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "22"][..],
@@ -184,15 +231,16 @@ pub fn render(
     env: &MediaEnv,
     segs: &[Segment],
     target: (i64, i64, f64),
+    look: Look,
     out: &Path,
     progress: &dyn Fn(f64),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<&'static str, RunError> {
-    let total_ms: i64 = segs.iter().map(|s| s.out_ms - s.in_ms).sum();
+    let total_ms = look.duration(segs);
     let mut last = String::new();
     for (name, decode, encoder) in [("hybrid-qsv", Decode::Hybrid, Encoder::Qsv), ("libx264", Decode::Software, Encoder::X264)] {
         let result = write_atomically(out, |part| {
-            let mut args = build_args(segs, decode, encoder, target);
+            let mut args = build_args(segs, decode, encoder, target, look);
             args.push(part.into());
             run_ffmpeg(env, &args, total_ms, progress, cancelled).map(drop)
         });
@@ -208,7 +256,7 @@ pub fn render(
     Err(RunError::Failed(last))
 }
 
-/// Job `media.export`, params `{"projectId": n, "preset": "landscape"}`.
+/// Job `media.export`, params `{"projectId": n, "preset": "landscape", "fit": "fit"|"fill", "transitionMs": 0}`.
 pub fn export_job(job: &Job, progress: &dyn Fn(u64, u64), cancelled: &dyn Fn() -> bool, env: &MediaEnv, projects: &Path) -> Outcome {
     let (Some(project_id), Some(preset_name)) = (job.params["projectId"].as_i64(), job.params["preset"].as_str()) else {
         return Outcome::Failed("media.export needs params.projectId and params.preset".into());
@@ -241,14 +289,18 @@ pub fn export_job(job: &Job, progress: &dyn Fn(u64, u64), cancelled: &dyn Fn() -
         return Outcome::Failed(format!("Original file is missing: {}", s.media.path));
     }
     let target = preset.target(&first.media);
+    let look = Look {
+        fill: job.params["fit"].as_str() == Some("fill"),
+        transition_ms: job.params["transitionMs"].as_i64().unwrap_or(0),
+    };
     let out = output_path(projects, project_id, &name, preset_name);
-    let expected_ms: i64 = segs.iter().map(|s| s.out_ms - s.in_ms).sum();
+    let expected_ms = look.duration(&segs);
 
     // Rendering is ~90 % of the job, validation (a full decode) the rest.
     const TOTAL: u64 = 1000;
     progress(0, TOTAL);
     let started = Instant::now();
-    let encoder = match render(env, &segs, target, &out, &|f| progress((f * 900.0) as u64, TOTAL), cancelled) {
+    let encoder = match render(env, &segs, target, look, &out, &|f| progress((f * 900.0) as u64, TOTAL), cancelled) {
         Ok(e) => e,
         Err(RunError::Cancelled) => return Outcome::Cancelled,
         Err(RunError::Failed(e)) => return Outcome::Failed(format!("Render failed: {e}")),
@@ -264,6 +316,8 @@ pub fn export_job(job: &Job, progress: &dyn Fn(u64, u64), cancelled: &dyn Fn() -
         "encoder": encoder,
         "renderSeconds": (render_seconds * 10.0).round() / 10.0,
         "durationMs": expected_ms,
+        "transitionMs": look.transition(&segs),
+        "fill": look.fill,
         "width": target.0,
         "height": target.1,
         "validation": validation,
@@ -340,10 +394,10 @@ mod tests {
         let target = (180, 320, 30.0);
         let one = |m: &Media| vec![Segment { media: m.clone(), in_ms: 0, out_ms: 1000 }];
         let (sw, hy) = (dir.join("sw.mp4"), dir.join("hy.mp4"));
-        let mut args = build_args(&one(&mr), Decode::Software, Encoder::X264, target);
+        let mut args = build_args(&one(&mr), Decode::Software, Encoder::X264, target, Look::default());
         args.push(sw.clone().into());
         assert!(run_ffmpeg(&env, &args, 1000, &|_| {}, &|| false).is_ok());
-        let mut args = build_args(&one(&mr), Decode::Hybrid, Encoder::Qsv, target);
+        let mut args = build_args(&one(&mr), Decode::Hybrid, Encoder::Qsv, target, Look::default());
         args.push(hy.clone().into());
         if run_ffmpeg(&env, &args, 1000, &|_| {}, &|| false).is_ok() {
             let (fs, fh) = (frame(&bin, &sw), frame(&bin, &hy));
@@ -362,7 +416,7 @@ mod tests {
         let target = Preset::Landscape.target(&ma);
         let out = dir.join("out.mp4");
         let last = Mutex::new(0.0);
-        let Ok(encoder) = render(&env, &segs, target, &out, &|f| *last.lock().unwrap() = f, &|| false) else {
+        let Ok(encoder) = render(&env, &segs, target, Look::default(), &out, &|f| *last.lock().unwrap() = f, &|| false) else {
             panic!("render failed");
         };
         assert!(*last.lock().unwrap() > 0.9, "progress reported");
@@ -370,6 +424,20 @@ mod tests {
         assert!(v.ok, "validation failed ({encoder}): {v:?}");
         // Second segment has no audio → silence is inserted, which is not a failure.
         assert!(a.exists() && rot.exists(), "originals untouched");
+
+        // Crossfades + centre crop (vertical output from landscape sources): 1 s + 1.5 s − 0.4 s overlap.
+        let look = Look { fill: true, transition_ms: 400 };
+        assert_eq!((look.transition(&segs), look.duration(&segs)), (400, 2100));
+        assert_eq!(Look { fill: false, transition_ms: 5000 }.transition(&segs), 500, "clamped to half the shortest clip");
+        let story = Preset::Story.target(&ma);
+        let (xf, fit) = (dir.join("xfade.mp4"), dir.join("fit.mp4"));
+        assert!(render(&env, &segs, story, look, &xf, &|_| {}, &|| false).is_ok());
+        let v = validate(&env, &xf, 2100, segs.len(), story);
+        assert!(v.ok, "crossfade export failed validation: {v:?}");
+        assert!(render(&env, &segs[..1], story, Look::default(), &fit, &|_| {}, &|| false).is_ok());
+        // Top row of a 9×16 grey thumbnail: letterbox = black bar, fill = picture.
+        let top = |f: &Path| frame(&bin, f)[..9].iter().map(|&x| x as u32).sum::<u32>() / 9;
+        assert!(top(&fit) < 20 && top(&xf) > 40, "fill crops instead of letterboxing (fit {}, fill {})", top(&fit), top(&xf));
 
         // Validation catches a wrong expectation.
         assert!(!validate(&env, &out, 9000, 2, target).ok);

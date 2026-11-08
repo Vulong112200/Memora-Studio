@@ -6,15 +6,43 @@
     "category": "vision",
     "description": "Visual concepts and text search over scene frames (beach, food, city, people …).",
     "required": false,
-    "license": "Not verified yet (model proposal pending)",
+    "license": "MIT (open_clip; LAION model card: English-only, research-oriented, fixed tag taxonomy used)",
     "minimumRamGb": 8,
     "validation": "openvino-ir",
     "artifacts": [
-      { "file": "openclip_image.xml", "url": null, "revision": null, "sha256": null, "sizeBytes": null },
-      { "file": "openclip_image.bin", "url": null, "revision": null, "sha256": null, "sizeBytes": null }
+      {
+        "file": "openclip_image.xml",
+        "url": null,
+        "revision": "laion/CLIP-ViT-B-32-laion2B-s34B-b79K@1a25a446712ba5ee05982a381eed697ef9b435cf, exported by tools/clip-export/export_openclip.py",
+        "sha256": "888fb43dcf3528894bbc9d900dcbed3b5cb9ede681dcc045a827bb24b3013756",
+        "sizeBytes": 491391
+      },
+      {
+        "file": "openclip_image.bin",
+        "url": null,
+        "revision": "laion/CLIP-ViT-B-32-laion2B-s34B-b79K@1a25a446712ba5ee05982a381eed697ef9b435cf, exported by tools/clip-export/export_openclip.py",
+        "sha256": "dd30af3f8e7da647b5a607d75feead24700d0cc3671d417de1719f73edf23ff5",
+        "sizeBytes": 175698576
+      },
+      {
+        "file": "openclip_tags.json",
+        "url": null,
+        "revision": "laion/CLIP-ViT-B-32-laion2B-s34B-b79K@1a25a446712ba5ee05982a381eed697ef9b435cf, exported by tools/clip-export/export_openclip.py",
+        "sha256": "8d2cad4da7152b1747b2bbca1c4e1ddcbc7eee17b8ec041704a7fc2a0e36b185",
+        "sizeBytes": 258328
+      }
     ],
-    "runtimes": [{ "runtime": "openvino", "devices": ["CPU", "GPU"], "validated": false }],
-    "notes": "Exported at development time from the official checkpoint (ADR 0001). Download stays disabled until the model proposal (source, revision, license, checksum) is approved."
+    "runtimes": [
+      {
+        "runtime": "openvino",
+        "devices": [
+          "CPU",
+          "GPU"
+        ],
+        "validated": false
+      }
+    ],
+    "notes": "Image encoder as OpenVINO IR (FP16 weights) + precomputed text embeddings for a fixed bilingual tag list. Exported locally (no download URL): install with \"Install from files\" from E:\\Memora Data\\downloads\\openclip-export. IR vs PyTorch CPU: min cosine 0.9999988 on 8 real frames."
   },
   {
     "id": "whisper-base",
@@ -23,11 +51,27 @@
     "category": "speech",
     "description": "Speech transcription for Vietnamese and English (default speech model).",
     "required": false,
-    "license": "Not verified yet (model proposal pending)",
+    "license": "MIT (OpenAI Whisper weights; ggml conversion by ggerganov/whisper.cpp)",
     "minimumRamGb": 4,
     "validation": "none",
-    "artifacts": [{ "file": "ggml-base.bin", "url": null, "revision": null, "sha256": null, "sizeBytes": null }],
-    "runtimes": [{ "runtime": "whisper.cpp", "devices": ["CPU"], "validated": false }],
+    "artifacts": [
+      {
+        "file": "ggml-base.bin",
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin",
+        "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+        "sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+        "sizeBytes": 147951465
+      }
+    ],
+    "runtimes": [
+      {
+        "runtime": "whisper.cpp",
+        "devices": [
+          "CPU"
+        ],
+        "validated": false
+      }
+    ],
     "notes": "Runs in whisper.cpp as a separate native process (ADR 0001). Load validation is added together with the whisper.cpp runtime."
   },
   {
@@ -37,11 +81,57 @@
     "category": "speech",
     "description": "Better transcription quality; optional, larger and slower than base.",
     "required": false,
-    "license": "Not verified yet (model proposal pending)",
+    "license": "MIT (OpenAI Whisper weights; ggml conversion by ggerganov/whisper.cpp)",
     "minimumRamGb": 8,
     "validation": "none",
-    "artifacts": [{ "file": "ggml-small.bin", "url": null, "revision": null, "sha256": null, "sizeBytes": null }],
-    "runtimes": [{ "runtime": "whisper.cpp", "devices": ["CPU"], "validated": false }],
+    "artifacts": [
+      {
+        "file": "ggml-small.bin",
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin",
+        "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+        "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+        "sizeBytes": 487601967
+      }
+    ],
+    "runtimes": [
+      {
+        "runtime": "whisper.cpp",
+        "devices": [
+          "CPU"
+        ],
+        "validated": false
+      }
+    ],
     "notes": "Download on demand only (docs/Production.md §3.3)."
+  },
+  {
+    "id": "silero-vad",
+    "name": "Silero VAD (speech detection)",
+    "version": "1",
+    "category": "speech",
+    "description": "Skips wind, engine and other non-speech audio before transcription; prevents invented text.",
+    "required": false,
+    "license": "MIT (Silero VAD; ggml conversion by ggml-org/whisper-vad)",
+    "minimumRamGb": 1,
+    "validation": "none",
+    "artifacts": [
+      {
+        "file": "ggml-silero-v6.2.0.bin",
+        "url": "https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v6.2.0.bin",
+        "revision": "9ffd54a1e1ee413ddf265af9913beaf518d1639b",
+        "sha256": "2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987",
+        "sizeBytes": 885098
+      }
+    ],
+    "runtimes": [
+      {
+        "runtime": "whisper.cpp",
+        "devices": [
+          "CPU"
+        ],
+        "validated": true
+      }
+    ],
+    "notes": "Used automatically by transcription when installed (whisper.cpp --vad). Measured on owner footage: removes noise hallucination loops, small model 53 s -> 33 s for 5 min."
   }
 ]

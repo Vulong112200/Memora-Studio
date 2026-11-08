@@ -99,7 +99,75 @@ export interface Media {
   proxy: string | null;
   /** Detected scenes; null until analysed. */
   sceneCount: number | null;
+  /** True once speech was transcribed (possibly with no speech found). */
+  transcribed: boolean;
+  /** Visual concepts over the clip (OpenCLIP, best first); null until tagged. */
+  tags: TagScore[] | null;
+  /** User override used by the Editing Core. */
+  mark: Mark;
 }
+
+export interface Mark { favorite: boolean; excluded: boolean }
+export const setMediaMark = (mediaId: number, mark: Mark) => invoke<void>("set_media_mark", { mediaId, mark });
+
+/** Editing style (src-tauri/src/editing.rs, docs/Production.md §6.3). */
+export interface EditingStyle {
+  id: string;
+  name: string;
+  targetMs: number;
+  exportPreset: ExportPreset;
+  clipMinMs: number;
+  clipMaxMs: number;
+  clipIdealMs: number;
+  transitionMs: number;
+  music: string;
+  titles: string;
+  pacing: string;
+  opening: string;
+  ending: string;
+}
+
+export interface PlanClip {
+  mediaId: number;
+  sceneIndex: number;
+  inMs: number;
+  outMs: number;
+  scores: { technical: number; semantic: number; speech: number; favorite: number };
+  rank: number;
+  tags: string[];
+  reasons: string[];
+}
+
+export interface Plan {
+  style: string;
+  targetMs: number;
+  totalMs: number;
+  transitionMs: number;
+  exportPreset: ExportPreset;
+  clips: PlanClip[];
+  skipped: string[];
+  candidates: number;
+}
+
+export const listStyles = () => invoke<EditingStyle[]>("list_styles");
+export const generatePlan = (projectId: number, style: string, from?: string, to?: string) =>
+  invoke<Plan>("generate_plan", { projectId, style, from: from ?? null, to: to ?? null });
+export const getPlan = (projectId: number) => invoke<Plan | null>("get_plan", { projectId });
+export const applyPlan = (projectId: number, keep: number[]) => invoke<number>("apply_plan", { projectId, keep });
+
+/** Mean OpenCLIP probability of a tag over a time range (src-tauri/src/tagging.rs). */
+export interface TagScore { en: string; vi: string; score: number }
+
+/** whisper.cpp transcript (src-tauri/src/transcribe.rs). Times are in the original file. */
+export interface Transcript {
+  mediaId: number;
+  modelId: string;
+  language: string | null;
+  segments: { startMs: number; endMs: number; text: string }[];
+  createdAt: string;
+}
+
+export const getTranscript = (mediaId: number) => invoke<Transcript | null>("get_transcript", { mediaId });
 
 /** Trimmed segment on a project timeline (src-tauri/src/timeline.rs). */
 export interface Clip {
@@ -165,6 +233,7 @@ export interface ScoredScene {
   technical: { sharpness: number; exposure: number; brightness: number; contrast: number; stability: number; total: number };
   flags: string[];
   duplicates: { mediaId: number; sceneIndex: number; distance: number }[];
+  tags: TagScore[];
 }
 
 export const listScenes = (mediaId: number) => invoke<ScoredScene[]>("list_scenes", { mediaId });

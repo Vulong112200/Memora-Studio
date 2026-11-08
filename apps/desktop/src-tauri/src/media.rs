@@ -45,6 +45,12 @@ pub struct Media {
     pub proxy: Option<PathBuf>,
     /// Number of detected scenes; None until analysed. Filled by the list command.
     pub scene_count: Option<i64>,
+    /// True once transcribed (`transcribe.rs`). Filled by the list command.
+    pub transcribed: bool,
+    /// Visual concepts over the whole clip (`tagging.rs`), None until tagged. Filled by the list command.
+    pub tags: Option<Vec<crate::tagging::TagScore>>,
+    /// User override (`editing.rs`). Filled by the list command.
+    pub mark: crate::editing::Mark,
 }
 
 fn num(v: &Value) -> Option<f64> {
@@ -152,6 +158,9 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Media> {
         thumb: None,
         proxy: None,
         scene_count: None,
+        transcribed: false,
+        tags: None,
+        mark: Default::default(),
     })
 }
 
@@ -236,6 +245,8 @@ fn import_one(file: &Path, env: &MediaEnv) -> Result<i64, String> {
         let changed = before.is_some_and(|b| b != (meta.len() as i64, modified));
         if changed {
             crate::analysis::clear(c, m.id)?;
+            crate::transcribe::clear(c, m.id)?;
+            crate::tagging::clear(c, m.id)?;
         }
         Ok((m, changed))
     })?;

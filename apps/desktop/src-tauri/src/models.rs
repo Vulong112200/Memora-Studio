@@ -109,6 +109,15 @@ pub fn list(c: &Connection) -> Result<Vec<ModelView>, String> {
         .collect()
 }
 
+/// Install folder of a model in state "ready", or a message telling the user what to install.
+pub fn ready_dir(c: &Connection, id: &str) -> Result<(Manifest, PathBuf), String> {
+    let m = list(c)?.into_iter().find(|m| m.manifest.id == id).ok_or(format!("Unknown model {id}"))?;
+    match (m.state.as_str(), m.path) {
+        ("ready", Some(dir)) => Ok((m.manifest, PathBuf::from(dir))),
+        _ => Err(format!("Install {} in AI models first.", m.manifest.name)),
+    }
+}
+
 fn set_state(db: &Mutex<Result<Connection, String>>, m: &Manifest, state: &str, error: Option<&str>, path: Option<&Path>, details: Option<&Value>) {
     let guard = db.lock().unwrap();
     if let Ok(c) = guard.as_ref() {
@@ -351,6 +360,20 @@ pub fn install_job(
         Some(Err(e)) => return Outcome::Failed(e),
         None => return Outcome::Failed("models.install needs params.id".into()),
     };
+    install_manifest_job(&m, job, progress, cancelled, models_root, job_object, db, ai)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_manifest_job(
+    m: &Manifest,
+    job: &Job,
+    progress: &dyn Fn(u64, u64),
+    cancelled: &dyn Fn() -> bool,
+    models_root: &Path,
+    job_object: &JobObject,
+    db: &Mutex<Result<Connection, String>>,
+    ai: &mut dyn FnMut(&Job, &dyn Fn(u64, u64), &dyn Fn() -> bool) -> Outcome,
+) -> Outcome {
     let mut validate = |m: &Manifest, dir: &Path| -> Result<Value, String> {
         match m.validation.as_str() {
             "none" => Ok(json!({"validation": "checksum only"})),
@@ -375,7 +398,7 @@ pub fn install_job(
             other => Err(format!("unknown validation kind: {other}")),
         }
     };
-    install(&m, job.params["files"].as_object(), models_root, job_object, db, &mut validate, progress, cancelled)
+    install(m, job.params["files"].as_object(), models_root, job_object, db, &mut validate, progress, cancelled)
 }
 
 #[cfg(test)]
@@ -499,7 +522,11 @@ mod tests {
                 "openclip_image.xml": dir.join("openclip_image.xml"), "openclip_image.bin": dir.join("openclip_image.bin")}}),
         };
         let root = dir.join("models");
-        let r = install_job(&job, &|_, _| {}, &|| false, &root, &jo, &db, &mut ai);
+        // Synthetic IR: same manifest without the real export's checksums and tag file.
+        let mut m = manifest("openclip-vit-b32").unwrap();
+        m.artifacts.retain(|a| a.file.starts_with("openclip_image"));
+        m.artifacts.iter_mut().for_each(|a| (a.sha256, a.size_bytes) = (None, None));
+        let r = install_manifest_job(&m, &job, &|_, _| {}, &|| false, &root, &jo, &db, &mut ai);
         let Outcome::Completed(v) = r else { panic!("install failed: {:?}", list(db.lock().unwrap().as_ref().unwrap()).unwrap()[0].error) };
         assert_eq!(v["details"]["inputs"][0]["shape"], json!([1, 3, 224, 224]));
         assert_eq!(v["details"]["devices"][0]["ok"], true);
@@ -513,7 +540,7 @@ mod tests {
 
     #[test]
     fn blocked_download_is_refused() {
-        let m = manifest("whisper-base").unwrap();
+        let m = manifest("openclip-vit-b32").unwrap(); // exported locally: never downloadable
         let db = Mutex::new(Ok(open_in_memory()));
         let mut ok = |_: &Manifest, _: &Path| Ok(Value::Null);
         let r = install(&m, None, Path::new("Z:\\nowhere"), &JobObject::new().unwrap(), &db, &mut ok, &|_, _| {}, &|| false);

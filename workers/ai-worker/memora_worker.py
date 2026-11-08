@@ -155,6 +155,15 @@ def analyze_video(job):
                             progress=job.progress, check_cancel=job.check_cancel)
 
 
+def tag_video(job):
+    """OpenCLIP tags every everyMs of the proxy. params: path, modelDir, everyMs, devices."""
+    import tagging
+
+    p = job.params
+    return tagging.tag_video(p["path"], p["modelDir"], p.get("everyMs", 2000), p.get("devices", ["GPU", "CPU"]),
+                             progress=job.progress, check_cancel=job.check_cancel)
+
+
 def validate_openvino_ir(job):
     """Model Manager load validation: read an OpenVINO IR, compile on each requested device (default
     CPU) and run one inference on zeros. Dynamic dims become 1, or 224 for image height/width."""
@@ -210,6 +219,7 @@ JOBS = {
     "validate_devices": validate_devices,
     "analyze_video": analyze_video,
     "validate_openvino_ir": validate_openvino_ir,
+    "tag_video": tag_video,
     "diagnostic.steps": diagnostic_steps,
     "diagnostic.crash": diagnostic_crash,
 }

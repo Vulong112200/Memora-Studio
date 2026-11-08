@@ -41,6 +41,8 @@ pub struct ScoredScene {
     /// Observations for the UI and the Editing Core, never automatic exclusions.
     pub flags: Vec<&'static str>,
     pub duplicates: Vec<Duplicate>,
+    /// Visual concepts in this scene (filled by the caller when the clip is tagged).
+    pub tags: Vec<crate::tagging::TagScore>,
 }
 
 fn clamp01(x: f64) -> f64 {
@@ -148,7 +150,7 @@ pub fn score(scenes: Vec<Scene>, library: &[(i64, i64, String)]) -> Vec<ScoredSc
             if !duplicates.is_empty() {
                 flags.push("duplicate");
             }
-            ScoredScene { scene, technical, flags, duplicates }
+            ScoredScene { scene, technical, flags, duplicates, tags: vec![] }
         })
         .collect()
 }

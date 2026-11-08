@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { formatBytes, getHardwareInfo, getSettings, setDataRoot, type HardwareInfo, type Project, type SettingsView } from "./api";
 import Projects from "./Projects";
 import Timeline from "./Timeline";
+import EditingPlan from "./EditingPlan";
 import AiCenter from "./AiCenter";
 import MediaLibrary from "./MediaLibrary";
 import Models from "./Models";
@@ -148,6 +149,11 @@ export default function App() {
             <div className="lg:col-span-2">
               <Projects key={settings.dataRoot} active={project} onOpen={setProject} />
             </div>
+            {project && (
+              <div className="lg:col-span-2">
+                <EditingPlan key={`${settings.dataRoot}-${project.id}`} project={project} onApplied={() => setTimelineVersion((v) => v + 1)} />
+              </div>
+            )}
             {project && (
               <div className="lg:col-span-2">
                 <Timeline key={`${settings.dataRoot}-${project.id}`} project={project} version={timelineVersion} />

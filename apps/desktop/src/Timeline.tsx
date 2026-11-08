@@ -46,6 +46,8 @@ export default function Timeline({ project, version }: { project: Project; versi
   const [clips, setClips] = useState<Clip[]>([]);
   const [media, setMedia] = useState<Map<number, Media>>(new Map());
   const [preset, setPreset] = useState<ExportPreset>("landscape");
+  const [transitionMs, setTransitionMs] = useState(0);
+  const [fill, setFill] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -64,7 +66,7 @@ export default function Timeline({ project, version }: { project: Project; versi
 
   const run = (p: Promise<unknown>) => p.then(load).catch((e) => setError(String(e)));
   const exporting = job && (job.status === "queued" || job.status === "running");
-  const total = clips.reduce((s, c) => s + c.outMs - c.inMs, 0);
+  const total = clips.reduce((s, c) => s + c.outMs - c.inMs, 0) - Math.max(0, clips.length - 1) * transitionMs;
   const result = job?.status === "completed" ? (job.result as ExportResult) : null;
 
   return (
@@ -75,15 +77,24 @@ export default function Timeline({ project, version }: { project: Project; versi
           <select
             className="rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700"
             value={preset}
-            onChange={(e) => setPreset(e.target.value as ExportPreset)}
+            onChange={(e) => { const p = e.target.value as ExportPreset; setPreset(p); setFill(p === "story" || p === "reels"); }}
             aria-label="Export preset"
           >
             {PRESETS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
           </select>
+          <select className="rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" value={transitionMs}
+            onChange={(e) => setTransitionMs(Number(e.target.value))} aria-label="Transitions">
+            <option value={0}>Hard cuts</option>
+            <option value={500}>Crossfade 0.5 s</option>
+            <option value={1000}>Crossfade 1 s</option>
+          </select>
+          <label className="flex items-center gap-1 text-xs text-zinc-500" title="Crop the centre to fill the frame instead of adding black bars">
+            <input type="checkbox" checked={fill} onChange={(e) => setFill(e.target.checked)} /> Fill frame
+          </label>
           <button
             className="rounded-md bg-zinc-900 px-4 py-1.5 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
             disabled={clips.length === 0 || !!exporting}
-            onClick={() => submitJob("media.export", { projectId: project.id, preset }).then(setJob).catch((e) => setError(String(e)))}
+            onClick={() => submitJob("media.export", { projectId: project.id, preset, transitionMs, fit: fill ? "fill" : "fit" }).then(setJob).catch((e) => setError(String(e)))}
           >
             Export
           </button>

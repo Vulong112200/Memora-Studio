@@ -71,6 +71,34 @@ const MIGRATIONS: &[&str] = &[
         details    TEXT,
         updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     );",
+    // 6: speech transcripts (whisper.cpp); segments are ordered {startMs, endMs, text}
+    "CREATE TABLE transcripts (
+        media_id      INTEGER PRIMARY KEY REFERENCES media(id) ON DELETE CASCADE,
+        model_id      TEXT NOT NULL,
+        language      TEXT,
+        segments_json TEXT NOT NULL,
+        created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );",
+    // 7: OpenCLIP tag observations (worker tagging.py), sampled over time; summaries computed on read
+    "CREATE TABLE media_tags (
+        media_id   INTEGER PRIMARY KEY REFERENCES media(id) ON DELETE CASCADE,
+        model_id   TEXT NOT NULL,
+        device     TEXT NOT NULL,
+        tags_json  TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );",
+    // 8: Editing Core — user marks (override automation) and the latest Editing Plan per project
+    "CREATE TABLE media_marks (
+        media_id INTEGER PRIMARY KEY REFERENCES media(id) ON DELETE CASCADE,
+        favorite INTEGER NOT NULL DEFAULT 0,
+        excluded INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE editing_plans (
+        project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+        style      TEXT NOT NULL,
+        plan_json  TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );",
 ];
 
 pub fn err(e: rusqlite::Error) -> String {
