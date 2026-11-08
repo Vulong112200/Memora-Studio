@@ -25,8 +25,10 @@ Library
 Projects
   projects | new-project NAME
   styles
+  understand TEXT                 what the app's request box reads from a sentence
+  plan PROJECT --request \"video dọc 30 giây, nhiều cây cổ thụ, bỏ selfie, tông ấm, tiêu đề: Đà Lạt\"
   plan PROJECT --style ID [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--target SECONDS]
-                [--prefer a,b] [--avoid c,d]       concepts in English or Vietnamese
+                [--prefer a,b] [--less c] [--avoid d,e]   concepts in English or Vietnamese
   show-plan PROJECT
   apply PROJECT [--keep 0,2,1]    plan clips (indices, in this order) → timeline + style look
 Timeline (times in seconds)
@@ -190,16 +192,27 @@ fn dispatch(ctx: &Ctx, a: &Args) -> Result<String, String> {
                 )
             })
             .collect()),
+        "understand" => ctx.with(|c| {
+            let r = crate::request::parse(&a.pos[1..].join(" "), &crate::vocabulary(c)?);
+            Ok(if r.understood.is_empty() { "nothing recognised\n".into() } else { r.understood.join("\n") + "\n" })
+        }),
         "plan" => ctx.with(|c| {
             let project = a.id(1, "PROJECT")?;
-            let st = editing::style(a.flags.get("style").map(String::as_str).ok_or("--style is required (see `styles`)")?)?;
-            let wishes = Wishes {
-                prefer: a.list("prefer"),
-                avoid: a.list("avoid"),
-                target_ms: a.flags.get("target").map(|v| ms(v)).transpose()?,
-            };
             let from = a.flags.get("from").map(String::as_str);
             let to = a.flags.get("to").map(String::as_str);
+            if let Some(request) = a.flags.get("request") {
+                let style = a.flags.get("style").map_or("travel_cinematic", String::as_str);
+                crate::make_plan(c, project, style, from, to, Some(request))?;
+                return show_plan(c, project);
+            }
+            let st = editing::style(a.flags.get("style").map(String::as_str).ok_or("--style (or --request) is required (see `styles`)")?)?;
+            let wishes = Wishes {
+                prefer: a.list("prefer"),
+                less: a.list("less"),
+                avoid: a.list("avoid"),
+                target_ms: a.flags.get("target").map(|v| ms(v)).transpose()?,
+                ..Default::default()
+            };
             let p = editing::plan_with(&st, &editing::gather(c, from, to)?, &wishes);
             editing::save(c, project, &p)?;
             show_plan(c, project)
@@ -212,9 +225,7 @@ fn dispatch(ctx: &Ctx, a: &Args) -> Result<String, String> {
                 Some(k) => k.split(',').map(|i| i.trim().parse().map_err(|_| format!("bad index in --keep: {i}"))).collect::<Result<_, _>>()?,
                 None => (0..plan.clips.len()).collect(),
             };
-            editing::apply(c, project, &keep)?;
-            let o = editing::styled_options(export::load_options(c, project), &editing::style(&plan.style)?, &plan);
-            export::save_options(c, project, &o)?;
+            let o = crate::apply_plan_to(c, project, &keep)?;
             Ok(format!("{}{}", show_timeline(c, project)?, show_options(&o)))
         }),
         "timeline" => ctx.with(|c| show_timeline(c, a.id(1, "PROJECT")?)),
@@ -390,7 +401,11 @@ fn show_plan(c: &Connection, project: i64) -> Result<String, String> {
         p.style, p.clips.len(), p.total_ms as f64 / 1000.0, p.target_ms / 1000, p.candidates, p.suggested_title
     );
     if p.wishes != Wishes::default() {
-        out += &format!("wishes: prefer [{}] avoid [{}]\n", p.wishes.prefer.join(", "), p.wishes.avoid.join(", "));
+        let w = &p.wishes;
+        out += &format!("wishes: prefer [{}] less [{}] avoid [{}]\n", w.prefer.join(", "), w.less.join(", "), w.avoid.join(", "));
+        if !w.request.is_empty() {
+            out += &format!("request: \"{}\"\n", w.request);
+        }
     }
     for (i, cl) in p.clips.iter().enumerate() {
         out += &format!(

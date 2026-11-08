@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
-  applyPlan, generatePlan, getPlan, listMedia, listStyles, submitJob,
-  type EditingStyle, type Media, type Plan, type Project,
+  applyPlan, generatePlan, getPlan, interpretRequest, listMedia, listStyles, submitJob,
+  type EditingStyle, type Media, type Plan, type Project, type RequestReading,
 } from "./api";
 import { clock } from "./Timeline";
 
@@ -17,6 +17,33 @@ const iso = (d: Date) => d.toISOString().slice(0, 10);
 const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
 const pct = (x: number) => Math.round(x * 100);
 const buttonClass = "rounded-md border border-zinc-300 px-3 py-1.5 text-sm disabled:opacity-40 dark:border-zinc-700";
+const EXAMPLE = "Video dọc 30 giây, nhiều cảnh cây cổ thụ và đường mòn, bớt xe đạp, bỏ selfie, tông ấm, nhạc nhẹ, tiêu đề: Đà Lạt";
+const WORDS = "length (30 giây, 1 phút) · dọc / ngang · nhiều / bớt / bỏ + what is on screen · tông ấm, lạnh, rực rỡ, cổ điển, đen trắng · nhạc nhẹ, sôi động, không nhạc · phụ đề · tiêu đề: … · kết thúc bằng: … · tháng 2/2026, năm 2025 · hoài niệm, tài liệu, tối giản, điện ảnh";
+
+/** Free-text request, read offline by keywords (request.rs); shows what it understood before anything is made. */
+function RequestBox({ text, onChange, reading }: { text: string; onChange: (t: string) => void; reading: RequestReading | null }) {
+  return (
+    <div className="mb-3">
+      <textarea
+        className="w-full rounded-md border border-zinc-300 bg-transparent px-3 py-2 text-sm dark:border-zinc-700"
+        rows={2}
+        value={text}
+        placeholder={`Describe the video you want, e.g. “${EXAMPLE}”`}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label="Describe the video you want"
+      />
+      {text.trim() !== "" && reading && (
+        reading.understood.length > 0 ? (
+          <p className="mt-1 text-xs text-zinc-500">
+            Understood: {reading.understood.map((u) => <span key={u} className="mr-1 inline-block rounded bg-zinc-100 px-1.5 py-0.5 dark:bg-zinc-800">{u}</span>)}
+          </p>
+        ) : (
+          <p className="mt-1 text-xs text-amber-600">Nothing recognised yet. Words that work: {WORDS}.</p>
+        )
+      )}
+    </div>
+  );
+}
 
 function range(id: string, from: string, to: string): { from?: string; to?: string } {
   if (id === "custom") return { from: from || undefined, to: to || undefined };
@@ -38,12 +65,24 @@ export default function EditingPlan({ project, onApplied }: { project: Project; 
   const [media, setMedia] = useState<Map<number, Media>>(new Map());
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [request, setRequest] = useState("");
+  const [reading, setReading] = useState<RequestReading | null>(null);
 
   useEffect(() => {
     listStyles().then(setStyles).catch((e) => setMessage(String(e)));
     listMedia().then((m) => setMedia(new Map(m.map((x) => [x.id, x])))).catch((e) => setMessage(String(e)));
-    getPlan(project.id).then((p) => show(p)).catch((e) => setMessage(String(e)));
+    getPlan(project.id).then((p) => {
+      show(p);
+      if (p?.wishes?.request) setRequest(p.wishes.request);
+    }).catch((e) => setMessage(String(e)));
   }, [project.id]);
+
+  // Read the request as the user types (cheap, offline); a short pause avoids work on every key.
+  useEffect(() => {
+    if (request.trim() === "") return setReading(null);
+    const t = setTimeout(() => interpretRequest(request).then(setReading).catch((e) => setMessage(String(e))), 250);
+    return () => clearTimeout(t);
+  }, [request]);
 
   function show(p: Plan | null) {
     setPlan(p);
@@ -58,7 +97,7 @@ export default function EditingPlan({ project, onApplied }: { project: Project; 
     setMessage(null);
     try {
       const r = range(rangeId, from, to);
-      show(await generatePlan(project.id, styleId, r.from, r.to));
+      show(await generatePlan(project.id, styleId, r.from, r.to, request.trim() || undefined));
       listMedia().then((m) => setMedia(new Map(m.map((x) => [x.id, x]))));
     } catch (e) {
       setMessage(String(e));
@@ -95,6 +134,8 @@ export default function EditingPlan({ project, onApplied }: { project: Project; 
   return (
     <section className="rounded-xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
       <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500">Smart edit · {project.name}</h2>
+      <RequestBox text={request} onChange={setRequest} reading={reading} />
+      {reading?.style && <p className="-mt-2 mb-2 text-xs text-zinc-500">The style and dates named in your request replace the selection below.</p>}
       <div className="flex flex-wrap items-center gap-2">
         <select className="rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" value={styleId}
           onChange={(e) => setStyleId(e.target.value)} aria-label="Editing style">
@@ -127,6 +168,7 @@ export default function EditingPlan({ project, onApplied }: { project: Project; 
             {kept.length} of {plan.clips.length} clips kept · {clock(total)} of {clock(plan.targetMs)} target · chosen from {plan.candidates} candidate
             windows. Scores: T technical · S visual concepts · V speech · ★ favorite. Videos you exclude in the library are never used.
           </p>
+          {plan.wishes?.request && <p className="text-xs text-zinc-500">Made from your request: “{plan.wishes.request}”</p>}
           {plan.skipped.map((s) => <p key={s} className="text-xs text-amber-600">{s}</p>)}
           {plan.clips.length === 0 && <p className="mt-2 text-sm text-zinc-500">Nothing to use: analyse videos in the Media library first (and tag / transcribe them for better choices).</p>}
           <ol className="mt-2 max-h-96 divide-y divide-zinc-200 overflow-y-auto dark:divide-zinc-800">

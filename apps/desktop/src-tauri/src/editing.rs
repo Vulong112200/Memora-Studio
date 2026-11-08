@@ -46,7 +46,7 @@ pub struct Style {
     pub captions: bool,
 }
 
-const LANDSCAPES: &[&str] = &["aerial view", "mountain", "sea", "beach", "sky and clouds", "sunrise", "lake", "waterfall", "rice field", "forest"];
+pub(crate) const LANDSCAPES: &[&str] = &["aerial view", "mountain", "sea", "beach", "sky and clouds", "sunrise", "lake", "waterfall", "rice field", "forest"];
 const PEOPLE: &[&str] = &["people", "group of friends", "family", "child", "selfie"];
 const NO_MUSIC: &str = "Original audio only. Background music is not available yet: no licensed offline music source has been chosen (open requirement).";
 const NO_TITLES: &str = "No burned-in titles yet: Vietnamese title rendering (libass/freetype) is still to be validated.";
@@ -199,15 +199,30 @@ pub struct PlanClip {
 }
 
 /// The user's own requests on top of a style (concept names match tag `en` or `vi`, case-insensitive).
+/// Stored with the plan; applying the plan honours the look / music / text wishes too.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Wishes {
     /// Concepts to show more of: rank × up to 1.5.
     pub prefer: Vec<String>,
+    /// Concepts to show less of: rank × 0.5 where they are on screen.
+    pub less: Vec<String>,
     /// Concepts to leave out: windows where one scores ≥ `AVOID_MIN` are not used.
     pub avoid: Vec<String>,
     /// Length instead of the style's target.
     pub target_ms: Option<i64>,
+    /// Export preset instead of the style's ("reels" = vertical 9:16, centre crop).
+    pub preset: Option<String>,
+    /// Colour look (export::COLORS) instead of the style's.
+    pub color: Option<String>,
+    pub title: Option<String>,
+    pub ending: Option<String>,
+    /// Speech subtitles on / off instead of the style's default.
+    pub captions: Option<bool>,
+    /// "none" = no music; "low" | "medium" | "high" | "any" = the best-suited library track of that energy.
+    pub music: Option<String>,
+    /// The sentence these wishes were read from (request box), kept for the record.
+    pub request: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,6 +291,8 @@ fn tag_score(tags: &[tagging::TagScore], names: &[&str]) -> f64 {
 const AVOID_MIN: f64 = 0.25;
 /// Most a preferred concept can raise a window's rank (×1.5 when the concept fills the window).
 const PREFER_BOOST: f64 = 0.5;
+/// Most a "less of" concept can lower a window's rank (×0.5 when the concept fills the window).
+const LESS_CUT: f64 = 0.5;
 
 fn named(t: &tagging::TagScore, names: &[String]) -> bool {
     names.iter().any(|n| n.trim().eq_ignore_ascii_case(&t.en) || n.trim().to_lowercase() == t.vi.to_lowercase())
@@ -339,6 +356,8 @@ fn candidates(src: &Source, st: &Style, wishes: &Wishes) -> (Vec<Candidate>, usi
             let (bad, tags): (Vec<_>, Vec<_>) = all.into_iter().partition(|t| t.negative);
             let wanted: Vec<_> = tags.iter().filter(|t| named(t, &wishes.prefer)).collect();
             let prefer = 1.0 + PREFER_BOOST * (2.0 * wanted.iter().map(|t| t.score).sum::<f64>()).min(1.0);
+            let fewer: Vec<_> = tags.iter().filter(|t| named(t, &wishes.less)).collect();
+            let prefer = prefer * (1.0 - LESS_CUT * (2.0 * fewer.iter().map(|t| t.score).sum::<f64>()).min(1.0));
             let semantic = match (&src.tags, st.favor.is_empty()) {
                 (None, _) => 0.5, // not tagged: neutral
                 (Some(_), true) => tags.first().map_or(0.0, |t| t.score),
@@ -360,6 +379,9 @@ fn candidates(src: &Source, st: &Style, wishes: &Wishes) -> (Vec<Candidate>, usi
             }
             if let Some(t) = wanted.first() {
                 reasons.push(format!("wanted: {} ({:.0}%)", t.vi, t.score * 100.0));
+            }
+            if let Some(t) = fewer.first() {
+                reasons.push(format!("less wanted: {} ({:.0}%)", t.vi, t.score * 100.0));
             }
             if scores.speech >= 0.3 {
                 reasons.push(format!("speech {:.0}%, sentences kept whole", scores.speech * 100.0));
@@ -466,6 +488,7 @@ fn merge_near(clips: Vec<PlanClip>) -> Vec<PlanClip> {
     out
 }
 
+#[cfg(test)]
 pub fn plan(st: &Style, sources: &[Source]) -> Plan {
     plan_with(st, sources, &Wishes::default())
 }
@@ -559,7 +582,7 @@ pub fn plan_with(st: &Style, sources: &[Source], wishes: &Wishes) -> Plan {
         target_ms: st.target_ms,
         total_ms: clips.iter().map(|c| c.out_ms - c.in_ms).sum::<i64>() - (n - 1).max(0) * st.transition_ms,
         transition_ms: st.transition_ms,
-        export_preset: st.export_preset.into(),
+        export_preset: wishes.preset.clone().unwrap_or_else(|| st.export_preset.into()),
         clips,
         skipped,
         candidates,
@@ -603,18 +626,28 @@ fn suggest_title(clips: &[PlanClip], sources: &[Source]) -> String {
     }
 }
 
-/// Export options after applying a plan: the style's look, existing music/titles kept, the suggested
-/// title used only when the user has none.
+/// Export options after applying a plan: the style's look, then the user's wishes (colour, text, subtitles,
+/// no music); existing music/titles kept otherwise, the suggested title used only when the user has none.
+/// Wished library music is chosen by the caller (it needs the applied timeline).
 pub fn styled_options(mut o: crate::export::Options, st: &Style, p: &Plan) -> crate::export::Options {
-    o.fill = st.export_preset == "reels";
+    let w = &p.wishes;
+    o.fill = p.export_preset == "reels";
     o.transition_ms = st.transition_ms;
     o.transition = st.transition.into();
-    o.color = st.color.into();
+    o.color = w.color.clone().unwrap_or_else(|| st.color.into());
     o.fade = true;
     o.normalize = true;
-    o.titles.captions = st.captions;
-    if o.titles.title.trim().is_empty() {
+    o.titles.captions = w.captions.unwrap_or(st.captions);
+    if let Some(t) = &w.title {
+        o.titles.title = t.clone();
+    } else if o.titles.title.trim().is_empty() {
         o.titles.title = p.suggested_title.clone();
+    }
+    if let Some(e) = &w.ending {
+        o.titles.ending = e.clone();
+    }
+    if w.music.as_deref() == Some("none") {
+        o.music = None;
     }
     o
 }
@@ -873,6 +906,27 @@ mod tests {
         assert!(p.clips.iter().all(|c| c.media_id == 2), "avoided concept never used");
         assert!(p.skipped.iter().any(|s| s.contains("windows left out: they show people")), "{:?}", p.skipped);
         assert!(p.total_ms <= 12_000 && p.target_ms == 12_000 && p.wishes == w, "length wish and wishes stored with the plan");
+    }
+
+    #[test]
+    fn applying_honours_look_and_text_wishes() {
+        let st = style("travel_cinematic").unwrap(); // landscape, cinematic, no subtitles
+        let w = Wishes {
+            preset: Some("reels".into()), color: Some("warm".into()), title: Some("Đà Lạt".into()), ending: Some("Hết".into()),
+            captions: Some(true), music: Some("none".into()), ..Default::default()
+        };
+        let p = plan_with(&st, &[src(media(1, "2026-02-20", 20_000), vec![scene(1, 0, 0, 20_000, 0.8)])], &w);
+        assert_eq!(p.export_preset, "reels");
+        let before = crate::export::Options {
+            music: Some(crate::export::Music { path: r"E:\song.mp3".into(), library: None, volume: 0.4, duck: true }),
+            titles: crate::export::Titles { title: "Old".into(), ..Default::default() },
+            ..Default::default()
+        };
+        let o = styled_options(before, &st, &p);
+        assert_eq!((o.fill, o.color.as_str(), o.titles.title.as_str(), o.titles.ending.as_str(), o.titles.captions), (true, "warm", "Đà Lạt", "Hết", true));
+        assert!(o.music.is_none(), "\"no music\" removes the music");
+        let o = styled_options(crate::export::Options::default(), &st, &plan(&st, &[]));
+        assert_eq!((o.fill, o.color.as_str(), o.titles.captions), (false, "cinematic", false), "no wishes: the style decides");
     }
 
     #[test]

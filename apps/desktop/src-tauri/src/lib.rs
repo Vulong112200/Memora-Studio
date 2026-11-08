@@ -11,6 +11,7 @@ mod models;
 mod process;
 mod projects;
 mod proxy;
+mod request;
 mod scoring;
 mod settings;
 mod sounds;
@@ -223,15 +224,77 @@ fn list_styles() -> Vec<editing::Style> {
 }
 
 /// Smart mode: builds and stores an Editing Plan for review. `from`/`to` = recording dates YYYY-MM-DD.
+/// `request` = the sentence from the request box; the style and dates it names win over the selection.
 #[tauri::command]
-fn generate_plan(project_id: i64, style: String, from: Option<String>, to: Option<String>, state: State<'_, AppState>) -> Result<editing::Plan, String> {
-    let st = editing::style(&style)?;
+fn generate_plan(
+    project_id: i64,
+    style: String,
+    from: Option<String>,
+    to: Option<String>,
+    request: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<editing::Plan, String> {
     with_db(&state, |c| {
-        let plan = editing::plan(&st, &editing::gather(c, from.as_deref(), to.as_deref())?);
-        editing::save(c, project_id, &plan)?;
-        tracing::info!(project_id, style, clips = plan.clips.len(), total_ms = plan.total_ms, "editing plan generated");
+        let plan = make_plan(c, project_id, &style, from.as_deref(), to.as_deref(), request.as_deref())?;
+        tracing::info!(project_id, style = plan.style, clips = plan.clips.len(), total_ms = plan.total_ms, "editing plan generated");
         Ok(plan)
     })
+}
+
+/// What the request box understood (read back to the user before a plan is made).
+#[tauri::command]
+fn interpret_request(text: String, state: State<'_, AppState>) -> Result<request::Request, String> {
+    with_db(&state, |c| Ok(request::parse(&text, &vocabulary(c)?)))
+}
+
+/// Concept names the library was tagged with (all taxonomy versions), for the request box.
+fn vocabulary(c: &Connection) -> Result<Vec<tagging::TagName>, String> {
+    let mut names: Vec<tagging::TagName> = vec![];
+    for t in tagging::all(c)?.into_values() {
+        for n in t.tags {
+            if !names.iter().any(|x| x.en == n.en) {
+                names.push(n);
+            }
+        }
+    }
+    Ok(names)
+}
+
+/// Builds and stores a plan. A non-empty `request` sentence adds its wishes; its style and dates win.
+fn make_plan(c: &Connection, project_id: i64, style: &str, from: Option<&str>, to: Option<&str>, request: Option<&str>) -> Result<editing::Plan, String> {
+    let req = match request.map(str::trim).filter(|r| !r.is_empty()) {
+        Some(r) => Some(request::parse(r, &vocabulary(c)?)),
+        None => None,
+    };
+    let st = editing::style(req.as_ref().and_then(|r| r.style.as_deref()).unwrap_or(style))?;
+    let (from, to) = match &req {
+        Some(r) if r.from.is_some() => (r.from.clone(), r.to.clone()),
+        _ => (from.map(String::from), to.map(String::from)),
+    };
+    let wishes = req.map(|r| r.wishes).unwrap_or_default();
+    let plan = editing::plan_with(&st, &editing::gather(c, from.as_deref(), to.as_deref())?, &wishes);
+    editing::save(c, project_id, &plan)?;
+    Ok(plan)
+}
+
+/// Replaces the timeline with the kept plan clips and saves the style's look with the user's wishes,
+/// including wished library music (the best-suited track of that energy for the new timeline).
+fn apply_plan_to(c: &Connection, project_id: i64, keep: &[usize]) -> Result<export::Options, String> {
+    editing::apply(c, project_id, keep)?;
+    let plan = editing::load(c, project_id)?.ok_or("Generate a plan first.")?;
+    let mut o = editing::styled_options(export::load_options(c, project_id), &editing::style(&plan.style)?, &plan);
+    if let Some(energy) = plan.wishes.music.as_deref().filter(|m| *m != "none") {
+        let tracks = sounds::catalog();
+        let pick = recommend_for(c, project_id, tracks.len())?
+            .into_iter()
+            .find(|r| energy == "any" || tracks.iter().any(|t| t.id == r.id && t.energy == energy));
+        if let Some(r) = pick {
+            let volume = o.music.as_ref().map_or(0.35, |m| m.volume);
+            o.music = Some(export::Music { path: String::new(), library: Some(r.id), volume, duck: true });
+        }
+    }
+    export::save_options(c, project_id, &o)?;
+    Ok(o)
 }
 
 #[tauri::command]
@@ -242,11 +305,8 @@ fn get_plan(project_id: i64, state: State<'_, AppState>) -> Result<Option<editin
 /// Replaces the timeline with the kept plan clips and sets the style's look in the export options.
 #[tauri::command]
 fn apply_plan(project_id: i64, keep: Vec<usize>, state: State<'_, AppState>) -> Result<export::Options, String> {
-    let n = with_db(&state, |c| editing::apply(c, project_id, &keep))?;
-    let plan = with_db(&state, |c| editing::load(c, project_id))?.ok_or("Generate a plan first.")?;
-    let options = editing::styled_options(get_export_options(project_id, state.clone())?, &editing::style(&plan.style)?, &plan);
-    set_export_options(project_id, options.clone(), state)?;
-    tracing::info!(project_id, clips = n, "editing plan applied");
+    let options = with_db(&state, |c| apply_plan_to(c, project_id, &keep))?;
+    tracing::info!(project_id, clips = keep.len(), "editing plan applied");
     Ok(options)
 }
 
@@ -458,6 +518,7 @@ pub fn run() {
             set_media_mark,
             list_styles,
             generate_plan,
+            interpret_request,
             get_plan,
             apply_plan,
             list_models,

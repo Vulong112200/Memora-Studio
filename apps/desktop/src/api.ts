@@ -138,8 +138,33 @@ export interface PlanClip {
   reasons: string[];
 }
 
+/** The user's requests on top of a style (editing.rs `Wishes`); concept names are tag `en` names. */
+export interface Wishes {
+  prefer: string[];
+  less: string[];
+  avoid: string[];
+  targetMs: number | null;
+  preset: ExportPreset | null;
+  color: string | null;
+  title: string | null;
+  ending: string | null;
+  captions: boolean | null;
+  music: string | null;
+  request: string;
+}
+
+/** What the request box read from a sentence (request.rs, offline keywords). */
+export interface RequestReading {
+  style: string | null;
+  from: string | null;
+  to: string | null;
+  wishes: Wishes;
+  understood: string[];
+}
+
 export interface Plan {
   style: string;
+  wishes: Wishes;
   targetMs: number;
   totalMs: number;
   transitionMs: number;
@@ -151,8 +176,9 @@ export interface Plan {
 }
 
 export const listStyles = () => invoke<EditingStyle[]>("list_styles");
-export const generatePlan = (projectId: number, style: string, from?: string, to?: string) =>
-  invoke<Plan>("generate_plan", { projectId, style, from: from ?? null, to: to ?? null });
+export const generatePlan = (projectId: number, style: string, from?: string, to?: string, request?: string) =>
+  invoke<Plan>("generate_plan", { projectId, style, from: from ?? null, to: to ?? null, request: request ?? null });
+export const interpretRequest = (text: string) => invoke<RequestReading>("interpret_request", { text });
 export const getPlan = (projectId: number) => invoke<Plan | null>("get_plan", { projectId });
 /** Replaces the timeline with the kept clips; returns the export options with the style's look applied. */
 export const applyPlan = (projectId: number, keep: number[]) => invoke<ExportOptions>("apply_plan", { projectId, keep });
