@@ -29,6 +29,33 @@ pub fn remove_cache(cache: &Path, id: i64) {
     let _ = std::fs::remove_dir_all(cache.join("frames").join(id.to_string()));
 }
 
+/// Temporary files of jobs the app did not finish (crash or forced close); call only while no job runs.
+/// Touches app-made temporaries only: titles, whisper audio and library music in the cache, and
+/// `.part` / `.level.mp4` files next to proxies, thumbnails and exports. Finished exports, proxies and
+/// the user's own files are never removed. Partial model downloads (resumable) are not here.
+pub fn remove_leftovers(root: &Path) -> usize {
+    let cache = root.join("cache");
+    let mut removed = 0;
+    let mut sweep = |dir: PathBuf, everything: bool| {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            let temp = everything || name.ends_with(".part") || name.ends_with(".level.mp4") || name.ends_with(".unvalidated.mp4");
+            if temp && e.path().is_file() && std::fs::remove_file(e.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    };
+    sweep(cache.join("render"), true);
+    sweep(cache.join("audio"), true);
+    sweep(cache.join("downloads").join("sounds"), true);
+    sweep(cache.join("thumbs"), false);
+    sweep(cache.join("proxy"), false);
+    for project in std::fs::read_dir(root.join("projects")).into_iter().flatten().flatten() {
+        sweep(project.path().join("exports"), false);
+    }
+    removed
+}
+
 /// Creates the proxy unless it already exists.
 pub fn ensure_proxy(m: &Media, env: &MediaEnv, progress: &dyn Fn(f64), cancelled: &dyn Fn() -> bool) -> Result<(), RunError> {
     if proxy_path(&env.cache, m.id).exists() {
@@ -108,18 +135,14 @@ pub fn run_ffmpeg(
     progress: &dyn Fn(f64),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<String, RunError> {
-    let mut child = command(&env.ffmpeg)
-        .args(["-hide_banner", "-nostdin", "-v", "error", "-progress", "pipe:1", "-nostats", "-y"])
+    let mut cmd = command(&env.ffmpeg);
+    cmd.args(["-hide_banner", "-nostdin", "-v", "error", "-progress", "pipe:1", "-nostats", "-y"])
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    let mut child = crate::process::spawn(&mut cmd, env.job_object)
         .map_err(|e| RunError::Failed(format!("Cannot start FFmpeg ({}): {e}", env.ffmpeg.display())))?;
-    if let Err(e) = env.job_object.assign(&child) {
-        let _ = child.kill();
-        return Err(RunError::Failed(e));
-    }
     let mut stderr = child.stderr.take().unwrap();
     let errors = std::thread::spawn(move || {
         let mut s = String::new();
@@ -292,5 +315,37 @@ mod tests {
         assert_eq!(fit(320, 240, 0, 540), (320, 240), "no upscaling");
         assert_eq!(fit(3840, 2160, 0, 180), (320, 180));
         assert_eq!(fit(1440, 1080, 0, 540), (720, 540));
+    }
+
+    #[test]
+    fn leftovers_are_removed_but_finished_files_kept() {
+        let root = std::env::temp_dir().join(format!("memora-leftovers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let files = [
+            ("cache/render/titles-1-2.ass", false),
+            ("cache/audio/7.wav", false),
+            ("cache/downloads/sounds/track-1-2.mp3", false),
+            ("cache/proxy/7.part", false),
+            ("cache/proxy/8.mp4", true),
+            ("cache/thumbs/8.jpg", true),
+            ("cache/frames/8/0.jpg", true),
+            ("projects/1/exports/Trip-reels-1.part", false),
+            ("projects/1/exports/Trip-reels-1.level.mp4", false),
+            ("projects/1/exports/Trip-reels-1.unvalidated.mp4", false),
+            ("projects/1/exports/Trip-reels-2.mp4", true),
+            ("models/.downloads/whisper-base-1/ggml-base.part", true),
+        ];
+        for (f, _) in files {
+            let p = root.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "x").unwrap();
+        }
+        assert_eq!(remove_leftovers(&root), files.iter().filter(|(_, keep)| !keep).count());
+        for (f, keep) in files {
+            assert_eq!(root.join(f).exists(), keep, "{f}");
+        }
+        assert_eq!(remove_leftovers(&root), 0);
+        assert_eq!(remove_leftovers(&root.join("missing")), 0, "absent folders are fine");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

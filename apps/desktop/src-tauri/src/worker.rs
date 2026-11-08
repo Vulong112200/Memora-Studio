@@ -10,10 +10,13 @@ use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const PROTOCOL: u64 = 1;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a cancelled job may take to stop on its own (the worker checks between batches, normally
+/// well under a second). Assumed value, not measured on the slowest model compiles.
+const CANCEL_GRACE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct WorkerPaths {
@@ -57,18 +60,9 @@ pub struct Worker {
 
 impl Worker {
     pub fn spawn(paths: &WorkerPaths, job_object: &JobObject) -> Result<Worker, String> {
-        let mut child = command(&paths.python)
-            .arg("-u")
-            .arg(&paths.script)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Cannot start AI worker ({}): {e}", paths.python.display()))?;
-        if let Err(e) = job_object.assign(&child) {
-            let _ = child.kill();
-            return Err(e);
-        }
+        let mut cmd = command(&paths.python);
+        cmd.arg("-u").arg(&paths.script).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = crate::process::spawn(&mut cmd, job_object).map_err(|e| format!("Cannot start AI worker ({}): {e}", paths.python.display()))?;
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
@@ -163,13 +157,22 @@ fn run_on(w: &mut Worker, job: &Job, progress: &dyn Fn(u64, u64), cancelled: &dy
     if let Err(e) = w.send(&start) {
         return (Outcome::Failed(e), false);
     }
-    let mut cancel_sent = false;
+    let mut cancel_sent: Option<Instant> = None;
     loop {
-        if !cancel_sent && cancelled() {
-            cancel_sent = true;
-            if let Err(e) = w.send(&json!({"type": "job.cancel", "id": id})) {
-                return (Outcome::Failed(e), false);
+        match cancel_sent {
+            None if cancelled() => {
+                cancel_sent = Some(Instant::now());
+                if let Err(e) = w.send(&json!({"type": "job.cancel", "id": id})) {
+                    return (Outcome::Failed(e), false);
+                }
             }
+            // Stuck in one long native call (e.g. a model compile): stop the process, restart on the next job.
+            Some(t) if t.elapsed() > CANCEL_GRACE => {
+                tracing::warn!(job_id = job.id, "AI worker ignored cancel; stopping it");
+                w.kill();
+                return (Outcome::Cancelled, false);
+            }
+            _ => {}
         }
         let m = match w.recv(Duration::from_millis(100)) {
             Recv::Timeout => continue,
@@ -235,6 +238,18 @@ mod tests {
         }
         m.cancel(id).unwrap();
         assert_eq!(wait_final(&rx, id).status, Status::Cancelled);
+
+        // A job that never checks for cancellation is stopped after the grace period; the next job restarts the worker.
+        let id = m.submit("diagnostic.block", json!({"seconds": 60})).id;
+        while m.list().iter().find(|j| j.id == id).unwrap().status != Status::Running {
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(500));
+        let started = Instant::now();
+        m.cancel(id).unwrap();
+        assert_eq!(wait_final(&rx, id).status, Status::Cancelled);
+        assert!(started.elapsed() < CANCEL_GRACE + Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(info.lock().unwrap().is_none(), "stuck worker was stopped");
 
         let id = m.submit("no.such.kind", Value::Null).id;
         assert!(wait_final(&rx, id).error.unwrap().contains("unknown job kind"));

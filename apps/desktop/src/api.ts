@@ -279,6 +279,8 @@ export const removeMedia = (id: number) => invoke<void>("remove_media", { id });
 
 export const getSettings =() => invoke<SettingsView>("get_settings");
 export const setDataRoot = (path: string) => invoke<SettingsView>("set_data_root", { path });
+/** Verified copy of the database in `<data root>\database\backups\` (also made automatically at every start). */
+export const backupDatabase = () => invoke<string>("backup_database");
 export const getHardwareInfo = () => invoke<HardwareInfo>("get_hardware_info");
 export const listProjects = () => invoke<Project[]>("list_projects");
 export const createProject = (name: string) => invoke<Project>("create_project", { name });

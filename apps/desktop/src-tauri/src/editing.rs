@@ -144,6 +144,11 @@ pub fn day(m: &Media) -> String {
     m.probe.source_created_at.as_deref().unwrap_or(&m.imported_at).chars().take(10).collect()
 }
 
+/// Recording time (ISO 8601, UTC) for chronological order; import time when unknown.
+fn recorded(m: &Media) -> String {
+    m.probe.source_created_at.clone().unwrap_or_else(|| m.imported_at.clone())
+}
+
 /// Library files recorded within [from, to] (inclusive YYYY-MM-DD, either optional), with their observations.
 pub fn gather(c: &Connection, from: Option<&str>, to: Option<&str>) -> Result<Vec<Source>, String> {
     let marks = marks(c)?;
@@ -186,17 +191,31 @@ pub struct PlanClip {
     pub in_ms: i64,
     pub out_ms: i64,
     pub scores: Scores,
-    /// Weighted rank used for selection (style weights × scores, diversity applied).
+    /// Weighted rank (style weights × scores, bad-shot penalty). Diversity is applied during selection, not stored.
     pub rank: f64,
     /// Main visual concepts (Vietnamese labels).
     pub tags: Vec<String>,
     pub reasons: Vec<String>,
 }
 
+/// The user's own requests on top of a style (concept names match tag `en` or `vi`, case-insensitive).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Wishes {
+    /// Concepts to show more of: rank × up to 1.5.
+    pub prefer: Vec<String>,
+    /// Concepts to leave out: windows where one scores ≥ `AVOID_MIN` are not used.
+    pub avoid: Vec<String>,
+    /// Length instead of the style's target.
+    pub target_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Plan {
     pub style: String,
+    #[serde(default)]
+    pub wishes: Wishes,
     pub target_ms: i64,
     pub total_ms: i64,
     pub transition_ms: i64,
@@ -253,6 +272,15 @@ fn tag_score(tags: &[tagging::TagScore], names: &[&str]) -> f64 {
     tags.iter().filter(|t| names.contains(&t.en.as_str())).map(|t| t.score).sum::<f64>().min(1.0)
 }
 
+/// A window where an avoided concept reaches this score is left out (tag summaries start at 0.1).
+const AVOID_MIN: f64 = 0.25;
+/// Most a preferred concept can raise a window's rank (×1.5 when the concept fills the window).
+const PREFER_BOOST: f64 = 0.5;
+
+fn named(t: &tagging::TagScore, names: &[String]) -> bool {
+    names.iter().any(|n| n.trim().eq_ignore_ascii_case(&t.en) || n.trim().to_lowercase() == t.vi.to_lowercase())
+}
+
 /// Technical score from the scene's sample frames inside [a, b) only (long single-shot clips vary a lot
 /// within one scene); the scene score when no sample falls inside.
 fn window_technical(sc: &ScoredScene, a: i64, b: i64) -> f64 {
@@ -291,8 +319,10 @@ fn window_hash(sc: &ScoredScene, a: i64, b: i64) -> Option<String> {
     sc.scene.samples.iter().min_by_key(|s| (s.at_ms - mid).abs()).map(|s| s.dhash.clone())
 }
 
-fn candidates(src: &Source, st: &Style) -> Vec<Candidate> {
+/// Candidate windows of one file, and how many were left out because of `wishes.avoid`.
+fn candidates(src: &Source, st: &Style, wishes: &Wishes) -> (Vec<Candidate>, usize) {
     let mut out = vec![];
+    let mut avoided = 0;
     let speech: Vec<(i64, i64)> = src.transcript.as_ref().map_or(vec![], |t| t.segments.iter().map(|s| (s.start_ms, s.end_ms)).collect());
     for sc in &src.scenes {
         let mut seen = HashSet::new();
@@ -302,7 +332,13 @@ fn candidates(src: &Source, st: &Style) -> Vec<Candidate> {
             .filter(|w| seen.insert(*w));
         for (a, b) in fitted.collect::<Vec<_>>() {
             let all = src.tags.as_ref().map(|t| tagging::summarize(t, a, b, SCENE_TAG_MIN)).unwrap_or_default();
+            if all.iter().any(|t| t.score >= AVOID_MIN && named(t, &wishes.avoid)) {
+                avoided += 1;
+                continue;
+            }
             let (bad, tags): (Vec<_>, Vec<_>) = all.into_iter().partition(|t| t.negative);
+            let wanted: Vec<_> = tags.iter().filter(|t| named(t, &wishes.prefer)).collect();
+            let prefer = 1.0 + PREFER_BOOST * (2.0 * wanted.iter().map(|t| t.score).sum::<f64>()).min(1.0);
             let semantic = match (&src.tags, st.favor.is_empty()) {
                 (None, _) => 0.5, // not tagged: neutral
                 (Some(_), true) => tags.first().map_or(0.0, |t| t.score),
@@ -316,10 +352,14 @@ fn candidates(src: &Source, st: &Style) -> Vec<Candidate> {
             // Bad shot (finger over the lens, accidental ground shot…): up to −80 %, never chosen as a hook.
             let bad_score: f64 = bad.iter().map(|t| t.score).sum();
             let rank = (w[0] * scores.technical + w[1] * scores.semantic + w[2] * scores.speech + w[3] * scores.favorite)
-                * (1.0 - (BAD_SHOT_WEIGHT * bad_score).min(0.8));
+                * (1.0 - (BAD_SHOT_WEIGHT * bad_score).min(0.8))
+                * prefer;
             let mut reasons = vec![format!("technical {:.0}", scores.technical * 100.0)];
             if let Some(t) = tags.first() {
                 reasons.push(format!("{} ({:.0}%)", t.vi, t.score * 100.0));
+            }
+            if let Some(t) = wanted.first() {
+                reasons.push(format!("wanted: {} ({:.0}%)", t.vi, t.score * 100.0));
             }
             if scores.speech >= 0.3 {
                 reasons.push(format!("speech {:.0}%, sentences kept whole", scores.speech * 100.0));
@@ -330,7 +370,8 @@ fn candidates(src: &Source, st: &Style) -> Vec<Candidate> {
             reasons.extend(sc.flags.iter().map(|f| f.to_string()));
             reasons.extend(bad.iter().filter(|t| t.score >= 0.15).map(|t| format!("⚠ {} ({:.0}%)", t.vi, t.score * 100.0)));
             out.push(Candidate {
-                order: (day(&src.media), src.media.id, a),
+                // Full recording time, so clips of one day play in the order they were filmed.
+                order: (recorded(&src.media), src.media.id, a),
                 dominant: tags.first().map(|t| t.en.clone()),
                 hash: window_hash(sc, a, b),
                 scene_ms: sc.scene.end_ms - sc.scene.start_ms,
@@ -350,7 +391,7 @@ fn candidates(src: &Source, st: &Style) -> Vec<Candidate> {
             });
         }
     }
-    out
+    (out, avoided)
 }
 
 /// Diversity: each already chosen clip with the same dominant concept ×0.85, from the same file ×0.9,
@@ -369,13 +410,18 @@ fn diversity(c: &Candidate, chosen: &[&Candidate], ideal_ms: i64) -> f64 {
 
 /// Same picture (dHash distance ≤ this, of 64 bits) and same main concept = nothing new to show.
 const SAME_PICTURE: u32 = 12;
-/// At most one clip per this much scene length (plus one), so one long shot is not chopped into many parts.
+/// Per main concept, at most one clip per this much scene length (plus one), so one long shot of the same
+/// thing is not chopped into many parts. A different concept in the same shot (walking a path, then the
+/// big tree at its end: owner feedback 2026-11-08) has its own allowance.
 const SCENE_MS_PER_CLIP: i64 = 60_000;
+/// While other content is available, one main concept fills at most this share of the target (owner
+/// feedback 2026-11-08: a recap that is mostly cycling is dull). Initial value, tune on real libraries.
+const MAX_CONCEPT_SHARE: f64 = 0.35;
 
-/// A further clip from an already used scene must show something different, within the per-scene cap.
+/// A further clip from an already used scene must show something different, within the per-concept cap.
 fn new_content(c: &Candidate, chosen: &[&Candidate]) -> bool {
     let same_scene: Vec<_> = chosen.iter().filter(|x| x.clip.media_id == c.clip.media_id && x.clip.scene_index == c.clip.scene_index).collect();
-    if same_scene.len() as i64 >= 1 + c.scene_ms / SCENE_MS_PER_CLIP {
+    if same_scene.iter().filter(|x| x.dominant == c.dominant).count() as i64 >= 1 + c.scene_ms / SCENE_MS_PER_CLIP {
         return false;
     }
     !same_scene.iter().any(|x| {
@@ -421,8 +467,15 @@ fn merge_near(clips: Vec<PlanClip>) -> Vec<PlanClip> {
 }
 
 pub fn plan(st: &Style, sources: &[Source]) -> Plan {
+    plan_with(st, sources, &Wishes::default())
+}
+
+/// Plan for `st` with the user's wishes (preferred / avoided concepts, length).
+pub fn plan_with(st: &Style, sources: &[Source], wishes: &Wishes) -> Plan {
+    let st = &Style { target_ms: wishes.target_ms.filter(|&t| t > 0).unwrap_or(st.target_ms), ..st.clone() };
     let mut skipped = vec![];
     let mut pool = vec![];
+    let mut avoided = 0;
     for s in sources {
         let name = s.media.path.rsplit(['\\', '/']).next().unwrap_or(&s.media.path).to_string();
         if s.excluded {
@@ -430,17 +483,23 @@ pub fn plan(st: &Style, sources: &[Source]) -> Plan {
         } else if s.scenes.is_empty() {
             skipped.push(format!("{name}: not analysed yet"));
         } else {
-            let c = candidates(s, st);
-            if c.is_empty() {
+            let (c, a) = candidates(s, st, wishes);
+            avoided += a;
+            if c.is_empty() && a == 0 {
                 skipped.push(format!("{name}: no scene long enough for this style"));
             }
             pool.extend(c);
         }
     }
+    if avoided > 0 {
+        skipped.push(format!("{avoided} windows left out: they show {}", wishes.avoid.join(", ")));
+    }
     let candidates = pool.len();
 
     let mut chosen: Vec<&Candidate> = vec![];
     let mut used: HashSet<(i64, i64)> = HashSet::new(); // (media, scene) already represented
+    let mut concept_ms: HashMap<&str, i64> = HashMap::new();
+    let share_ms = (st.target_ms as f64 * MAX_CONCEPT_SHARE) as i64;
     let mut total = 0;
     while total + st.clip_min_ms <= st.target_ms {
         let best = pool
@@ -448,11 +507,19 @@ pub fn plan(st: &Style, sources: &[Source]) -> Plan {
             .filter(|c| !chosen.iter().any(|x| x.clip.media_id == c.clip.media_id && overlap(x.clip.in_ms, x.clip.out_ms, c.clip.in_ms, c.clip.out_ms) > 0))
             .filter(|c| !c.duplicates.iter().any(|d| used.contains(d)))
             .filter(|c| new_content(c, &chosen))
-            .map(|c| (c, c.clip.rank * diversity(c, &chosen, st.clip_ideal_ms), distance(c, &chosen)))
-            // Ties: farthest from the clips already taken from that file (even coverage), then time order.
-            .max_by(|(a, ra, da), (b, rb, db)| ra.total_cmp(rb).then(da.cmp(db)).then(b.order.cmp(&a.order)));
-        let Some((c, _, _)) = best else { break };
+            .map(|c| {
+                let len = c.clip.out_ms - c.clip.in_ms;
+                let within = c.dominant.as_deref().is_none_or(|d| concept_ms.get(d).copied().unwrap_or(0) + len <= share_ms);
+                (c, within, c.clip.rank * diversity(c, &chosen, st.clip_ideal_ms), distance(c, &chosen))
+            })
+            // Concepts still within their share first (others only fill up the target when nothing else is left);
+            // ties: farthest from the clips already taken from that file (even coverage), then time order.
+            .max_by(|(a, wa, ra, da), (b, wb, rb, db)| wa.cmp(wb).then(ra.total_cmp(rb)).then(da.cmp(db)).then(b.order.cmp(&a.order)));
+        let Some((c, _, _, _)) = best else { break };
         total += c.clip.out_ms - c.clip.in_ms;
+        if let Some(d) = c.dominant.as_deref() {
+            *concept_ms.entry(d).or_default() += c.clip.out_ms - c.clip.in_ms;
+        }
         used.insert((c.clip.media_id, c.clip.scene_index));
         chosen.push(c);
     }
@@ -488,6 +555,7 @@ pub fn plan(st: &Style, sources: &[Source]) -> Plan {
     let suggested_title = suggest_title(&clips, sources);
     Plan {
         style: st.id.into(),
+        wishes: wishes.clone(),
         target_ms: st.target_ms,
         total_ms: clips.iter().map(|c| c.out_ms - c.in_ms).sum::<i64>() - (n - 1).max(0) * st.transition_ms,
         transition_ms: st.transition_ms,
@@ -748,6 +816,77 @@ mod tests {
     }
 
     #[test]
+    fn variety_beats_one_repeated_activity() {
+        // Owner's library pattern: many technically perfect cycling clips, one continuous shot that walks a path
+        // (here "sea") and then reaches the big tree ("people"), and other moments of lower technical quality.
+        let st = style("clean_minimal").unwrap(); // 60 s, no favoured concepts
+        let mut sources = vec![];
+        for i in 1..=10 {
+            let mut bike = src(media(i, "2026-02-20", 30_000), vec![scene(i, 0, 0, 30_000, 0.95)]);
+            bike.tags = Some(tags(&[2; 15], 0.95));
+            sources.push(bike);
+        }
+        let mut walk = src(media(20, "2026-02-21", 56_000), vec![scene(20, 0, 0, 56_000, 0.8)]);
+        walk.tags = Some(tags(&[[0; 5].as_slice(), [1; 23].as_slice()].concat(), 0.9));
+        sources.push(walk);
+        for i in 30..40 {
+            let mut other = src(media(i, "2026-02-22", 20_000), vec![scene(i, 0, 0, 20_000, 0.7)]);
+            let mut t = tags(&[3; 10], 0.9);
+            let (en, vi) = [("market", "chợ"), ("temple", "chùa"), ("food", "đồ ăn"), ("beach", "bãi biển"), ("dog", "chó")][(i % 5) as usize];
+            t.tags.push(TagName { en: en.into(), vi: vi.into(), negative: false });
+            other.tags = Some(t);
+            sources.push(other);
+        }
+        let p = plan(&st, &sources);
+        let walk_clips: Vec<_> = p.clips.iter().filter(|c| c.media_id == 20).collect();
+        assert!(walk_clips.iter().any(|c| c.in_ms < 10_000), "the walk up the path is kept: {walk_clips:?}");
+        assert!(walk_clips.iter().any(|c| c.in_ms >= 10_000), "and the tree at its end");
+        let bike_ms: i64 = p.clips.iter().filter(|c| c.tags.first().is_some_and(|t| t == "xe đạp")).map(|c| c.out_ms - c.in_ms).sum();
+        assert!(bike_ms as f64 <= st.target_ms as f64 * MAX_CONCEPT_SHARE, "cycling limited to its share: {bike_ms} ms");
+        assert!(bike_ms > 0, "the best footage still appears");
+
+        // Nothing else to show: the share only orders the choice, the target is still filled.
+        let only_bikes = &sources[..10];
+        assert!(plan(&st, only_bikes).total_ms as f64 > st.target_ms as f64 * MAX_CONCEPT_SHARE);
+    }
+
+    #[test]
+    fn wishes_prefer_avoid_and_length() {
+        let st = style("clean_minimal").unwrap();
+        let library = || {
+            let mut people = src(media(1, "2026-02-20", 40_000), vec![scene(1, 0, 0, 40_000, 0.9)]);
+            people.tags = Some(tags(&[1; 20], 0.9));
+            let mut sea = src(media(2, "2026-02-20", 40_000), vec![scene(2, 0, 0, 40_000, 0.6)]);
+            sea.tags = Some(tags(&[0; 20], 0.9));
+            vec![people, sea]
+        };
+        let best = |p: &Plan, m: i64| p.clips.iter().filter(|c| c.media_id == m).map(|c| c.rank).fold(0.0, f64::max);
+
+        let plain = plan(&st, &library());
+        assert!(best(&plain, 1) > best(&plain, 2), "sharper people footage wins by default");
+        let wished = plan_with(&st, &library(), &Wishes { prefer: vec!["Biển".into()], ..Default::default() });
+        assert!(best(&wished, 2) > best(&wished, 1), "a preferred concept (Vietnamese name, any case) wins");
+        assert!(wished.clips.iter().any(|c| c.reasons.iter().any(|r| r.starts_with("wanted: biển"))));
+
+        let w = Wishes { avoid: vec!["people".into()], target_ms: Some(12_000), ..Default::default() };
+        let p = plan_with(&st, &library(), &w);
+        assert!(p.clips.iter().all(|c| c.media_id == 2), "avoided concept never used");
+        assert!(p.skipped.iter().any(|s| s.contains("windows left out: they show people")), "{:?}", p.skipped);
+        assert!(p.total_ms <= 12_000 && p.target_ms == 12_000 && p.wishes == w, "length wish and wishes stored with the plan");
+    }
+
+    #[test]
+    fn same_day_clips_follow_recording_time() {
+        let st = style("clean_minimal").unwrap();
+        let mut late = media(1, "2026-02-20", 4_000);
+        late.probe.source_created_at = Some("2026-02-20T16:00:00Z".into());
+        let mut early = media(2, "2026-02-20", 4_000);
+        early.probe.source_created_at = Some("2026-02-20T08:00:00Z".into());
+        let p = plan(&st, &[src(late, vec![scene(1, 0, 0, 4_000, 0.9)]), src(early, vec![scene(2, 0, 0, 4_000, 0.9)])]);
+        assert_eq!(p.clips.iter().map(|c| c.media_id).collect::<Vec<_>>(), [2, 1], "morning before afternoon, whatever the import order");
+    }
+
+    #[test]
     fn duplicates_are_not_picked_twice() {
         let st = style("clean_minimal").unwrap();
         let mut s1 = scene(1, 0, 0, 4_000, 0.9);
@@ -793,8 +932,16 @@ fn real_library_plans() {
     for st in styles() {
         let p = plan(&st, &sources);
         println!("== {} target {}s → {} clips, {:.1}s, {} candidates, skipped {:?}", st.name, st.target_ms / 1000, p.clips.len(), p.total_ms as f64 / 1000.0, p.candidates, p.skipped);
-        for c in p.clips.iter().take(6) {
+        let mut share: Vec<(String, i64)> = vec![];
+        for c in &p.clips {
             println!("   #{} {:>6.1}-{:<6.1} rank {:.2} {:?}", c.media_id, c.in_ms as f64 / 1000.0, c.out_ms as f64 / 1000.0, c.rank, c.reasons);
+            let t = c.tags.first().cloned().unwrap_or_default();
+            match share.iter_mut().find(|(n, _)| *n == t) {
+                Some(e) => e.1 += c.out_ms - c.in_ms,
+                None => share.push((t, c.out_ms - c.in_ms)),
+            }
         }
+        share.sort_by_key(|(_, ms)| -ms);
+        println!("   concepts: {}", share.iter().map(|(t, ms)| format!("{t} {:.0}s", *ms as f64 / 1000.0)).collect::<Vec<_>>().join(", "));
     }
 }

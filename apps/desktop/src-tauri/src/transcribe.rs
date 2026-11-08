@@ -142,20 +142,15 @@ fn run_whisper(
         // Silero VAD: decode speech regions only (timestamps stay in the original timeline).
         cmd.args(["--vad".as_ref(), "-vm".as_ref(), v.as_os_str()]);
     }
-    let mut child = cmd
-        .args(["-m".as_ref(), model.as_os_str(), "-f".as_ref(), wav.as_os_str(), "-of".as_ref(), out_base.as_os_str()])
+    cmd.args(["-m".as_ref(), model.as_os_str(), "-f".as_ref(), wav.as_os_str(), "-of".as_ref(), out_base.as_os_str()])
         // -mc 0: no text context between windows, -sns: suppress non-speech tokens. Both cut noise
         // hallucination loops sharply on the owner's DJI footage (docs/MODEL_PROPOSAL.md §4).
         .args(["-oj", "-np", "-pp", "-mc", "0", "-sns", "-l", language, "-t", &threads.to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    let mut child = crate::process::spawn(&mut cmd, job_object)
         .map_err(|e| RunError::Failed(format!("Cannot start whisper.cpp ({}): {e}", cli.display())))?;
-    if let Err(e) = job_object.assign(&child) {
-        let _ = child.kill();
-        return Err(RunError::Failed(e));
-    }
     // stderr on a thread so cancellation is checked even while whisper prints nothing (model loading).
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     let stderr = child.stderr.take().unwrap();

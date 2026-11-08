@@ -1,4 +1,5 @@
 mod analysis;
+pub mod cli;
 mod db;
 mod editing;
 mod export;
@@ -90,6 +91,20 @@ fn open_db(data_root: Option<&Path>) -> Result<Connection, String> {
     result
 }
 
+/// After a crash or forced close: interrupted model installs and temporary files. Runs only while no job
+/// is queued or running (app start, data-folder switch), so everything it finds is stale.
+fn reconcile(c: &Connection, root: &Path) {
+    match models::reset_interrupted(c) {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!(models = n, "interrupted model installs marked as failed"),
+        Err(e) => tracing::error!(error = %e, "cannot reset interrupted model installs"),
+    }
+    let n = proxy::remove_leftovers(root);
+    if n > 0 {
+        tracing::info!(files = n, "temporary files of unfinished jobs removed");
+    }
+}
+
 fn with_db<T>(state: &AppState, f: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
     let guard = state.db.lock().unwrap();
     f(guard.as_ref().map_err(Clone::clone)?)
@@ -102,15 +117,32 @@ fn get_settings(state: State<'_, AppState>) -> SettingsView {
 
 #[tauri::command]
 fn set_data_root(path: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SettingsView, String> {
+    // A running job keeps the old folder's paths but writes through the shared database handle:
+    // switching under it would store rows in the wrong database.
+    if state.jobs.busy() {
+        return Err("Wait until the running jobs finish (or cancel them) before changing the data folder.".into());
+    }
     let app_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(PathBuf::from));
     let root = settings::prepare_data_root(&path, app_dir.as_deref())?;
+    // Open first: a folder whose database cannot be opened is not saved, the current one stays in use.
+    let db = open_db(Some(&root))?;
+    reconcile(&db, &root);
     let new = settings::Settings { data_root: Some(root.clone()) };
     settings::save(&state.config_dir, &new)?;
     *state.settings.lock().unwrap() = new;
-    *state.db.lock().unwrap() = open_db(Some(&root));
+    *state.db.lock().unwrap() = Ok(db);
     allow_cache_assets(&app, &root);
     tracing::info!(data_root = %root.display(), "data root set");
     Ok(view(&state))
+}
+
+/// Verified copy of the database in `<data root>\database\backups\`; returns its path.
+#[tauri::command]
+fn backup_database(state: State<'_, AppState>) -> Result<PathBuf, String> {
+    let root = state.settings.lock().unwrap().data_root.clone().ok_or(NO_DATA_ROOT)?;
+    let path = with_db(&state, |c| db::backup(c, &db::backups_dir(&root.join("database").join("memora.db")), "manual"))?;
+    tracing::info!(backup = %path.display(), "database backed up by the user");
+    Ok(path)
 }
 
 #[tauri::command]
@@ -257,26 +289,12 @@ fn set_clip_caption(id: i64, caption: String, state: State<'_, AppState>) -> Res
 /// Saved export options of a project (look, music, titles); defaults when never saved.
 #[tauri::command]
 fn get_export_options(project_id: i64, state: State<'_, AppState>) -> Result<export::Options, String> {
-    with_db(&state, |c| {
-        let j: Option<String> = c
-            .query_row("SELECT export_json FROM project_settings WHERE project_id = ?1", [project_id], |r| r.get(0))
-            .ok();
-        Ok(j.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default())
-    })
+    with_db(&state, |c| Ok(export::load_options(c, project_id)))
 }
 
 #[tauri::command]
 fn set_export_options(project_id: i64, options: export::Options, state: State<'_, AppState>) -> Result<(), String> {
-    options.check()?;
-    with_db(&state, |c| {
-        c.execute(
-            "INSERT INTO project_settings (project_id, export_json) VALUES (?1, ?2)
-             ON CONFLICT (project_id) DO UPDATE SET export_json = excluded.export_json",
-            rusqlite::params![project_id, serde_json::to_string(&options).unwrap()],
-        )
-        .map_err(db::err)
-        .map(drop)
-    })
+    with_db(&state, |c| export::save_options(c, project_id, &options))
 }
 
 #[tauri::command]
@@ -288,27 +306,29 @@ fn list_sounds() -> Vec<sounds::Track> {
 /// the timeline length and how much of it is speech.
 #[tauri::command]
 fn recommend_sounds(project_id: i64, state: State<'_, AppState>) -> Result<Vec<sounds::Recommendation>, String> {
-    with_db(&state, |c| {
-        let style = editing::load(c, project_id)?.map(|p| p.style).unwrap_or_else(|| "clean_minimal".into());
-        let clips = timeline::list(c, project_id)?;
-        let mut tags: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-        let (mut total, mut speech) = (0i64, 0i64);
-        for clip in &clips {
-            let len = clip.out_ms - clip.in_ms;
-            total += len;
-            if let Some(t) = tagging::get(c, clip.media_id)? {
-                for s in tagging::summarize(&t, clip.in_ms, clip.out_ms, 0.1).into_iter().filter(|s| !s.negative) {
-                    *tags.entry(s.en).or_default() += s.score * len as f64;
-                }
-            }
-            if let Some(t) = transcribe::get(c, clip.media_id)? {
-                speech += t.segments.iter().map(|s| (s.end_ms.min(clip.out_ms) - s.start_ms.max(clip.in_ms)).max(0)).sum::<i64>();
+    with_db(&state, |c| recommend_for(c, project_id, 3))
+}
+
+fn recommend_for(c: &Connection, project_id: i64, n: usize) -> Result<Vec<sounds::Recommendation>, String> {
+    let style = editing::load(c, project_id)?.map(|p| p.style).unwrap_or_else(|| "clean_minimal".into());
+    let clips = timeline::list(c, project_id)?;
+    let mut tags: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let (mut total, mut speech) = (0i64, 0i64);
+    for clip in &clips {
+        let len = clip.out_ms - clip.in_ms;
+        total += len;
+        if let Some(t) = tagging::get(c, clip.media_id)? {
+            for s in tagging::summarize(&t, clip.in_ms, clip.out_ms, 0.1).into_iter().filter(|s| !s.negative) {
+                *tags.entry(s.en).or_default() += s.score * len as f64;
             }
         }
-        let mut tags: Vec<(String, f64)> = tags.into_iter().map(|(k, v)| (k, v / total.max(1) as f64)).collect();
-        tags.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        Ok(sounds::recommend(&style, &tags, total, speech as f64 / total.max(1) as f64, 3))
-    })
+        if let Some(t) = transcribe::get(c, clip.media_id)? {
+            speech += t.segments.iter().map(|s| (s.end_ms.min(clip.out_ms) - s.start_ms.max(clip.in_ms)).max(0)).sum::<i64>();
+        }
+    }
+    let mut tags: Vec<(String, f64)> = tags.into_iter().map(|(k, v)| (k, v / total.max(1) as f64)).collect();
+    tags.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    Ok(sounds::recommend(&style, &tags, total, speech as f64 / total.max(1) as f64, n))
 }
 
 #[tauri::command]
@@ -347,6 +367,41 @@ fn get_worker_info(state: State<'_, AppState>) -> Option<Value> {
     state.worker_info.lock().unwrap().clone()
 }
 
+/// Executes every job kind: media and model jobs in Rust (child processes), everything else in the AI worker.
+/// Shared by the app's job queue and the command-line tool (cli.rs).
+fn job_runner(settings: Arc<Mutex<settings::Settings>>, db: Db, worker_info: Arc<Mutex<Option<Value>>>) -> Result<jobs::Runner, String> {
+    let job_object = Arc::new(process::JobObject::new()?);
+    let s = settings.clone();
+    let mut ai = worker::runner(move || s.lock().unwrap().data_root.clone(), job_object.clone(), worker_info);
+    Ok(Box::new(move |job, progress, cancelled| {
+        if !job.kind.starts_with("media.") && !job.kind.starts_with("models.") {
+            return ai(job, progress, cancelled);
+        }
+        let Some(root) = settings.lock().unwrap().data_root.clone() else {
+            return jobs::Outcome::Failed(NO_DATA_ROOT.into());
+        };
+        if job.kind == "models.install" {
+            return models::install_job(job, progress, cancelled, &root.join("models"), &job_object, &db, &mut ai);
+        }
+        let env = media::MediaEnv {
+            ffprobe: media::tool_path(Some(&root), "ffprobe.exe"),
+            ffmpeg: media::tool_path(Some(&root), "ffmpeg.exe"),
+            cache: root.join("cache"),
+            job_object: &job_object,
+            db: &db,
+        };
+        match job.kind.as_str() {
+            "media.import" => media::import_job(job, progress, cancelled, &env),
+            "media.proxy" => proxy::proxy_job(job, progress, cancelled, &env),
+            "media.export" => export::export_job(job, progress, cancelled, &env, &root.join("projects")),
+            "media.analyze" => analysis::analyze_job(job, progress, cancelled, &env, &mut ai),
+            "media.tag" => tagging::tag_job(job, progress, cancelled, &env, &mut ai),
+            "media.transcribe" => transcribe::transcribe_job(job, progress, cancelled, &env, &root),
+            k => jobs::Outcome::Failed(format!("Unknown job kind: {k}")),
+        }
+    }))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -356,49 +411,18 @@ pub fn run() {
             let settings = settings::load(&config_dir);
             let (log_dir, guard) = logging::init(settings.data_root.as_ref().map(|r| r.join("logs")));
             tracing::info!(version = env!("CARGO_PKG_VERSION"), data_root = ?settings.data_root, "Memora Studio started");
-            let db: Db = Arc::new(Mutex::new(open_db(settings.data_root.as_deref())));
+            let db = open_db(settings.data_root.as_deref());
             if let Some(root) = &settings.data_root {
                 allow_cache_assets(app.handle(), root);
+                if let Ok(c) = &db {
+                    reconcile(c, root);
+                }
             }
+            let db: Db = Arc::new(Mutex::new(db));
 
             let settings = Arc::new(Mutex::new(settings));
             let worker_info = Arc::new(Mutex::new(None));
-            let job_object = Arc::new(process::JobObject::new()?);
-            let s = settings.clone();
-            let mut ai = worker::runner(
-                move || s.lock().unwrap().data_root.clone(),
-                job_object.clone(),
-                worker_info.clone(),
-            );
-            let (s, media_db) = (settings.clone(), db.clone());
-            // Media and model jobs run in Rust (child processes); everything else goes to the AI worker.
-            let runner: jobs::Runner = Box::new(move |job, progress, cancelled| {
-                if !job.kind.starts_with("media.") && !job.kind.starts_with("models.") {
-                    return ai(job, progress, cancelled);
-                }
-                let Some(root) = s.lock().unwrap().data_root.clone() else {
-                    return jobs::Outcome::Failed(NO_DATA_ROOT.into());
-                };
-                if job.kind == "models.install" {
-                    return models::install_job(job, progress, cancelled, &root.join("models"), &job_object, &media_db, &mut ai);
-                }
-                let env = media::MediaEnv {
-                    ffprobe: media::tool_path(Some(&root), "ffprobe.exe"),
-                    ffmpeg: media::tool_path(Some(&root), "ffmpeg.exe"),
-                    cache: root.join("cache"),
-                    job_object: &job_object,
-                    db: &media_db,
-                };
-                match job.kind.as_str() {
-                    "media.import" => media::import_job(job, progress, cancelled, &env),
-                    "media.proxy" => proxy::proxy_job(job, progress, cancelled, &env),
-                    "media.export" => export::export_job(job, progress, cancelled, &env, &root.join("projects")),
-                    "media.analyze" => analysis::analyze_job(job, progress, cancelled, &env, &mut ai),
-                    "media.tag" => tagging::tag_job(job, progress, cancelled, &env, &mut ai),
-                    "media.transcribe" => transcribe::transcribe_job(job, progress, cancelled, &env, &root),
-                    k => jobs::Outcome::Failed(format!("Unknown job kind: {k}")),
-                }
-            });
+            let runner = job_runner(settings.clone(), db.clone(), worker_info.clone())?;
             let handle = app.handle().clone();
             let jobs = jobs::JobManager::start(
                 runner,
@@ -421,6 +445,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             set_data_root,
+            backup_database,
             get_hardware_info,
             list_projects,
             create_project,

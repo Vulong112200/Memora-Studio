@@ -144,6 +144,11 @@ impl JobManager {
     pub fn list(&self) -> Vec<Job> {
         self.0.inner.lock().unwrap().jobs.clone()
     }
+
+    /// True while any job is queued or running.
+    pub fn busy(&self) -> bool {
+        self.0.inner.lock().unwrap().jobs.iter().any(|j| matches!(j.status, Status::Queued | Status::Running))
+    }
 }
 
 fn update(s: &Shared, id: u64, f: impl FnOnce(&mut Job)) {
@@ -243,8 +248,10 @@ mod tests {
     #[test]
     fn cancel_queued_and_running() {
         let (m, rx) = manager();
+        assert!(!m.busy());
         let running = m.submit("long", json!({"steps": 200})).id;
         let queued = m.submit("next", json!({"steps": 1})).id;
+        assert!(m.busy());
         m.cancel(queued).unwrap();
         assert_eq!(wait_final(&rx, queued).status, Status::Cancelled);
         while m.list().iter().find(|j| j.id == running).unwrap().done == 0 {
@@ -254,6 +261,7 @@ mod tests {
         let j = wait_final(&rx, running);
         assert_eq!(j.status, Status::Cancelled);
         assert!(j.done < 200);
+        assert!(!m.busy(), "nothing queued or running");
         assert!(m.cancel(running).is_err(), "finished jobs cannot be cancelled");
         assert!(m.cancel(999).is_err());
     }

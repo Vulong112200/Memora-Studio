@@ -64,6 +64,32 @@ pub fn add(c: &Connection, project_id: i64, media_id: i64, in_ms: i64, out_ms: i
     Ok(clip)
 }
 
+/// New In / Out of one clip (same rules as `add`: Out clamped to the media length, at least 0.1 s).
+pub fn set_range(c: &Connection, clip_id: i64, in_ms: i64, out_ms: i64) -> Result<Clip, String> {
+    let (project_id, duration): (i64, i64) = c
+        .query_row(
+            "SELECT p.project_id, m.duration_ms FROM project_clips p JOIN media m ON m.id = p.media_id WHERE p.id = ?1",
+            [clip_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(err)?
+        .ok_or(format!("Clip {clip_id} not found."))?;
+    let out_ms = out_ms.min(duration);
+    if in_ms < 0 || out_ms - in_ms < 100 {
+        return Err("A clip must be at least 0.1 s long (In must be before Out).".into());
+    }
+    let clip = c
+        .query_row(
+            &format!("UPDATE project_clips SET in_ms = ?2, out_ms = ?3 WHERE id = ?1 RETURNING {COLUMNS}"),
+            params![clip_id, in_ms, out_ms],
+            row,
+        )
+        .map_err(err)?;
+    touch(c, project_id)?;
+    Ok(clip)
+}
+
 /// Sets (or clears, with empty text) the caption of one clip.
 pub fn set_caption(c: &Connection, clip_id: i64, caption: &str) -> Result<(), String> {
     let text = caption.trim();
@@ -134,6 +160,18 @@ mod tests {
         assert!(add(&c, p, 999, 0, 1000).is_err());
         assert!(add(&c, 999, m, 0, 1000).is_err());
         assert_eq!(add(&c, p, m, 0, 1000).unwrap().position, 1);
+    }
+
+    #[test]
+    fn set_range_validates_and_clamps() {
+        let (c, p, m) = setup();
+        let id = add(&c, p, m, 0, 1000).unwrap().id;
+        let clip = set_range(&c, id, 2000, 99_000).unwrap();
+        assert_eq!((clip.in_ms, clip.out_ms, clip.position), (2000, 10_000, 0), "out clamped, position kept");
+        assert!(set_range(&c, id, 5000, 5050).is_err());
+        assert!(set_range(&c, id, -1, 1000).is_err());
+        assert!(set_range(&c, 999, 0, 1000).is_err());
+        assert_eq!(list(&c, p).unwrap()[0].in_ms, 2000, "failed updates change nothing");
     }
 
     #[test]

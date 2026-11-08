@@ -114,19 +114,19 @@ pub fn tool_path(data_root: Option<&Path>, exe: &str) -> PathBuf {
     bundled.into_iter().chain(on_path).chain(winget).find(|p| p.exists()).unwrap_or_else(|| exe.into())
 }
 
-/// Runs FFprobe and returns its raw JSON.
-// ponytail: no timeout; a hung ffprobe blocks the queue until cancelled by app exit. Add one if seen on real files.
+/// FFprobe reads headers only (seconds at most on local files); assumed limit, not measured on slow network drives.
+const FFPROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Runs FFprobe and returns its raw JSON. Killed after `FFPROBE_TIMEOUT` so a hung probe cannot block the queue.
 pub fn run_ffprobe(ffprobe: &Path, file: &Path, job_object: &JobObject) -> Result<String, String> {
-    let child = command(ffprobe)
-        .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
+    let mut cmd = command(ffprobe);
+    cmd.args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
         .arg(file)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Cannot start FFprobe ({}): {e}", ffprobe.display()))?;
-    job_object.assign(&child)?;
-    let out = child.wait_with_output().map_err(|e| format!("FFprobe failed: {e}"))?;
+        .stderr(Stdio::piped());
+    let child = crate::process::spawn(&mut cmd, job_object).map_err(|e| format!("Cannot start FFprobe ({}): {e}", ffprobe.display()))?;
+    let out = crate::process::wait_output(child, FFPROBE_TIMEOUT, &|| false).map_err(|e| format!("FFprobe failed on {}: {e}", file.display()))?;
     if !out.status.success() {
         let msg = String::from_utf8_lossy(&out.stderr);
         return Err(format!("FFprobe could not read the file: {}", msg.trim()));

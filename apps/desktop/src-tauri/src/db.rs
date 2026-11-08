@@ -2,7 +2,7 @@
 //! Schema migrations are an append-only list applied in order; `PRAGMA user_version` = number applied.
 
 use rusqlite::Connection;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Append only. Never edit a migration that has shipped; add a new one instead.
@@ -111,13 +111,75 @@ pub fn err(e: rusqlite::Error) -> String {
     format!("Database error: {e}")
 }
 
+/// Backups kept in `<database folder>\backups\`; older ones are deleted (the database is small, < 1 MB today).
+const KEEP_BACKUPS: usize = 10;
+
+pub fn backups_dir(db_path: &Path) -> PathBuf {
+    db_path.parent().unwrap_or(Path::new(".")).join("backups")
+}
+
+/// Opens (and migrates) the database. An existing database is first copied to `backups\`: at start-up (unless
+/// a copy is less than 10 minutes old), and always before a schema migration — if that copy fails, the migration is not run.
+/// Restore: close the app, copy a backup over `memora.db`, delete `memora.db-wal` and `memora.db-shm`.
 pub fn open(path: &Path) -> Result<Connection, String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
     }
     let c = Connection::open(path).map_err(err)?;
     c.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(())).map_err(err)?;
+    let applied = user_version(&c)?;
+    let pending = applied < MIGRATIONS.len();
+    // Start-up copies are skipped when one is fresh (the command-line tool opens the database per command).
+    if applied > 0 && (pending || !backed_up_within(&backups_dir(path), STARTUP_BACKUP_INTERVAL)) {
+        match backup(&c, &backups_dir(path), if pending { "before-upgrade" } else { "startup" }) {
+            Ok(p) => tracing::info!(backup = %p.display(), "database backed up"),
+            Err(e) if pending => return Err(format!("Cannot back up the database before upgrading it, so it was not changed: {e}")),
+            Err(e) => tracing::warn!(error = %e, "database backup failed"),
+        }
+    }
     init(c)
+}
+
+const STARTUP_BACKUP_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+fn backed_up_within(dir: &Path, interval: Duration) -> bool {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.metadata().ok()?.modified().ok()?.elapsed().ok())
+        .any(|age| age < interval)
+}
+
+fn user_version(c: &Connection) -> Result<usize, String> {
+    c.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(err)
+}
+
+/// Consistent copy of the open database (`VACUUM INTO` includes committed WAL content), checked with
+/// `PRAGMA integrity_check`, named `memora-<UTC time>-v<schema>-<label>.db`. Keeps the newest `KEEP_BACKUPS`.
+pub fn backup(c: &Connection, dir: &Path, label: &str) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
+    let stamp: String = c.query_row("SELECT strftime('%Y%m%d-%H%M%f', 'now')", [], |r| r.get(0)).map_err(err)?;
+    let base = format!("memora-{}-v{}-{label}", stamp.replace('.', ""), user_version(c)?);
+    let path = (1..).map(|i| dir.join(if i == 1 { format!("{base}.db") } else { format!("{base}-{i}.db") })).find(|p| !p.exists()).unwrap();
+    c.execute("VACUUM INTO ?1", [path.to_string_lossy()]).map_err(err)?;
+    let check = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .and_then(|b| b.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0)));
+    if check.as_deref() != Ok("ok") {
+        let _ = std::fs::remove_file(&path);
+        return Err(format!("The backup copy failed its integrity check: {check:?}"));
+    }
+    let mut old: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("memora-")) && p.extension().is_some_and(|x| x == "db"))
+        .collect();
+    old.sort(); // the timestamp follows the prefix, so name order is time order
+    for p in old.iter().take(old.len().saturating_sub(KEEP_BACKUPS)) {
+        let _ = std::fs::remove_file(p);
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -184,6 +246,36 @@ mod tests {
         let c = open(&path).unwrap();
         let mode: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
         assert_eq!(mode, "wal");
+        drop(c);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn existing_database_is_backed_up_on_open_and_old_backups_pruned() {
+        let dir = std::env::temp_dir().join(format!("memora-db-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("database").join("memora.db");
+        let c = open(&path).unwrap();
+        assert!(!backups_dir(&path).exists(), "a brand-new database has nothing to back up");
+        c.execute("INSERT INTO projects (name) VALUES ('Đà Lạt')", []).unwrap(); // stays in the WAL file
+        drop(c);
+
+        let c = open(&path).unwrap();
+        let backups: Vec<_> = std::fs::read_dir(backups_dir(&path)).unwrap().flatten().map(|e| e.path()).collect();
+        assert_eq!(backups.len(), 1);
+        let name = backups[0].file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.starts_with("memora-") && name.ends_with(&format!("-v{}-startup.db", MIGRATIONS.len())), "{name}");
+        let copy = Connection::open(&backups[0]).unwrap();
+        let n: String = copy.query_row("SELECT name FROM projects", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, "Đà Lạt", "committed WAL content is in the copy");
+        drop(copy); // Windows cannot delete an open file
+        drop(open(&path).unwrap());
+        assert_eq!(std::fs::read_dir(backups_dir(&path)).unwrap().count(), 1, "no second start-up copy within the interval");
+
+        for _ in 0..KEEP_BACKUPS + 2 {
+            backup(&c, &backups_dir(&path), "manual").unwrap();
+        }
+        assert_eq!(std::fs::read_dir(backups_dir(&path)).unwrap().count(), KEEP_BACKUPS);
         drop(c);
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Memora Studio desktop application"
 edition = "2024"
 publish = false
+# The app; src/bin/memora-cli.rs is the command-line tool built next to it.
+default-run = "memora-desktop"
 
 [lib]
 # The `_lib` suffix avoids a lib/bin name clash on Windows (rust-lang/cargo#8519).

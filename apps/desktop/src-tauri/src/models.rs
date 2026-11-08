@@ -139,6 +139,20 @@ fn set_state(db: &Mutex<Result<Connection, String>>, m: &Manifest, state: &str, 
     }
 }
 
+/// Run before any job starts (app start, data-folder switch): rows still in a working state belong to an
+/// install the app did not finish (crash or forced close). They become `install_failed`, so the user sees
+/// what happened and can Remove or install again. Partial downloads stay for resuming.
+pub fn reset_interrupted(c: &Connection) -> Result<usize, String> {
+    c.execute(
+        "UPDATE models SET state = 'install_failed',
+            error = 'Interrupted: Memora Studio closed during installation. Install again.',
+            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE state IN ('downloading', 'verifying', 'installing', 'validating')",
+        [],
+    )
+    .map_err(err)
+}
+
 fn clear_state(c: &Connection, id: &str) -> Result<(), String> {
     c.execute("DELETE FROM models WHERE id = ?1", [id]).map_err(err).map(drop)
 }
@@ -181,16 +195,14 @@ pub(crate) enum Step {
 /// Progress is the size of the partial file.
 pub(crate) fn download(url: &str, dest: &Path, job_object: &JobObject, progress: &dyn Fn(u64), cancelled: &dyn Fn() -> bool) -> Result<(), Step> {
     let part = dest.with_extension("part");
-    let mut child = command(Path::new("curl.exe"))
-        .args(["--location", "--fail", "--silent", "--show-error", "--retry", "3", "--continue-at", "-", "--output"])
+    let mut cmd = command(Path::new("curl.exe"));
+    cmd.args(["--location", "--fail", "--silent", "--show-error", "--retry", "3", "--continue-at", "-", "--output"])
         .arg(&part)
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| Step::Failed("download_failed", format!("Cannot start curl.exe: {e}")))?;
-    job_object.assign(&child).map_err(|e| Step::Failed("download_failed", e))?;
+        .stderr(Stdio::piped());
+    let mut child = crate::process::spawn(&mut cmd, job_object).map_err(|e| Step::Failed("download_failed", format!("Cannot start curl.exe: {e}")))?;
     loop {
         if cancelled() {
             let _ = child.kill();
@@ -423,6 +435,22 @@ mod tests {
         }
         let c = open_in_memory();
         assert!(list(&c).unwrap().iter().all(|v| v.state == "not_installed"));
+    }
+
+    #[test]
+    fn interrupted_installs_become_failed_and_ready_ones_stay() {
+        let c = open_in_memory();
+        for (id, state) in [("whisper-base", "downloading"), ("whisper-small", "validating"), ("silero-vad", "ready")] {
+            c.execute("INSERT INTO models (id, version, state) VALUES (?1, '1', ?2)", [id, state]).unwrap();
+        }
+        assert_eq!(reset_interrupted(&c).unwrap(), 2);
+        let state = |id: &str| -> (String, Option<String>) {
+            c.query_row("SELECT state, error FROM models WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+        };
+        assert_eq!(state("whisper-base").0, "install_failed");
+        assert!(state("whisper-small").1.unwrap().contains("Interrupted"));
+        assert_eq!(state("silero-vad"), ("ready".into(), None));
+        assert_eq!(reset_interrupted(&c).unwrap(), 0, "idempotent");
     }
 
     #[test]

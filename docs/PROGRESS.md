@@ -52,6 +52,21 @@ See `docs/MODEL_PROPOSAL.md` §4: whisper.cpp b5454 runtime installed in `<data 
 - Second loudness pass (measure → exact gain + limiter): real export −19.6 → −16.4 LUFS.
 - Verified: 64 Rust tests + real download/verify/delete test, real export with library music (credit frame inspected, download folder empty afterwards), release app: library opens, preview plays, recommendation shown.
 
+#### Reliability batch + plan variety (2026-11-08) — audit `docs/IMPROVEMENT_AUDIT.md`, batches 1–5 approved
+- R6: `set_data_root` refused while a job is queued/running; the new database is opened before settings are saved (a folder whose database fails to open is not saved).
+- R3: start-up / folder-switch reconciliation: model rows left in a working state → `install_failed` "Interrupted…" (Remove visible again); app temporaries removed (`cache\render|audio|downloads\sounds`, `.part`, `.level.mp4`, `.unvalidated.mp4`); resumable model downloads kept.
+- R4: `process::spawn` (child killed if it cannot join the Job Object — 6 call sites), `process::wait_output` with timeout/cancel (ffprobe 60 s, loudness measure 600 s — assumed limits); AI worker killed 10 s after an ignored cancel and restarted on the next job (test job `diagnostic.block`).
+- R5: export renders to `<name>.unvalidated.mp4`, then levels and validates it, then promotes it to a free name (`-2`, `-3` … — an earlier export is never replaced); a failed validation is kept as `…-failed-validation.mp4`; no second (libx264) render after disk-full / permission errors; levelled temp file cleaned on rename failure.
+- R2: database copied with `VACUUM INTO` + `integrity_check` to `database\backups\` at every start and before any migration (migration refused if that copy fails); last 10 kept; "Back up now" + restore steps in the Data folder card.
+- Plan variety (owner feedback: walk up the path to the big tree dropped, too much cycling): the per-scene cap now counts per main concept, one concept fills at most 35 % of the target while other content exists (`MAX_CONCEPT_SHARE`, initial value), same-day clips ordered by recording time. On a copy of the real library, Travel Cinematic: cycling 7 clips (~55 s of 85 s) → 4 clips (26 s); the path walk (0007, 0–7 s) now included; 8 concepts instead of 4.
+- Verified: 72 Rust tests (3 ignored manual ones), `tsc --noEmit`.
+
+#### Command-line tool + editing wishes (2026-11-08, owner approved)
+- `memora-cli.exe` (`src/bin/memora-cli.rs` → `src/cli.rs`): the engine without the window, same data folder / database / Editing Core / export as the app (`MEMORA_DATA_ROOT` overrides the folder). Library (`status`, `media`, `concepts`, `scenes`, `transcript`, `job`), projects and plans (`plan … --prefer --avoid --target`, `show-plan`, `apply --keep`), timeline (`clip-add|trim|remove|move|caption`), `options`, `sounds`, `export`. Close the app before export/job commands. `memora-cli help` lists everything.
+- Editing wishes (`editing::Wishes`, stored with the plan): preferred concepts raise rank up to ×1.5 (reason "wanted: …"), avoided concepts leave out windows where they score ≥ 0.25, optional length. Not in the app UI yet.
+- Shared code moved, not duplicated: `lib::job_runner` (app queue + CLI), `export::load_options/save_options`, `lib::recommend_for`, `timeline::set_range`. Start-up database copy skipped when one is < 10 min old (the CLI opens the database per command).
+- Verified: 76 Rust tests; on a COPY of the data folder: `plan 1 --style travel_cinematic --target 45 --prefer "đường mòn,cây cổ thụ,thuyền"` → 6 clips incl. the path walk and the big tree, `apply`, `options --color warm --title …`, `export` → valid 1920×1080 39.9 s file (hybrid-qsv, 48 s render); release build of app + CLI.
+
 ### Still open (owner decisions or later work)
 - Packaging / installer: needs the FFmpeg GPL licence review before any distribution and an embedded Python runtime (ADR 0002); not built.
 - Bundled music library (user's own files work now), subject-aware crop, text animation presets, GPS/location, month/year grouping in the library, Whisper GPU experiment.

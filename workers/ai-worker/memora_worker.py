@@ -215,6 +215,12 @@ def diagnostic_crash(job):
     os._exit(3)
 
 
+def diagnostic_block(job):
+    """Test-only: one long call that never checks for cancellation (like a slow model compile)."""
+    time.sleep(float(job.params.get("seconds", 30)))
+    return {}
+
+
 JOBS = {
     "validate_devices": validate_devices,
     "analyze_video": analyze_video,
@@ -222,6 +228,7 @@ JOBS = {
     "tag_video": tag_video,
     "diagnostic.steps": diagnostic_steps,
     "diagnostic.crash": diagnostic_crash,
+    "diagnostic.block": diagnostic_block,
 }
 
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { formatBytes, getHardwareInfo, getSettings, setDataRoot, type HardwareInfo, type Project, type SettingsView } from "./api";
+import { backupDatabase, formatBytes, getHardwareInfo, getSettings, setDataRoot, type HardwareInfo, type Project, type SettingsView } from "./api";
 import Projects from "./Projects";
 import Timeline from "./Timeline";
 import EditingPlan from "./EditingPlan";
@@ -76,7 +76,40 @@ function DataFolder({ settings, onSaved }: { settings: SettingsView; onSaved: (s
       {settings.restartRequired && (
         <p className="mt-2 text-sm text-amber-600">Restart Memora Studio to write logs to the new folder.</p>
       )}
+      {settings.dataRoot && !settings.databaseError && <Backup />}
     </Card>
+  );
+}
+
+function Backup() {
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  async function run() {
+    setBusy(true);
+    try {
+      setResult({ ok: true, text: `Saved ${await backupDatabase()}` });
+    } catch (e) {
+      setResult({ ok: false, text: String(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="mt-3 border-t border-zinc-200 pt-3 text-sm dark:border-zinc-800">
+      <div className="flex items-center justify-between gap-4">
+        <span className="text-zinc-500">
+          Projects and edits are backed up when Memora Studio starts (last 10 kept in <code>database\backups</code>).
+        </span>
+        <button className="shrink-0 underline underline-offset-2 disabled:opacity-50" onClick={run} disabled={busy}>
+          Back up now
+        </button>
+      </div>
+      {result && <p className={`mt-1 break-all ${result.ok ? "text-green-600" : "text-red-600"}`}>{result.text}</p>}
+      <p className="mt-1 text-xs text-zinc-500">
+        To restore: close Memora Studio, copy a backup over <code>database\memora.db</code> and delete{" "}
+        <code>memora.db-wal</code> and <code>memora.db-shm</code>.
+      </p>
+    </div>
   );
 }
 

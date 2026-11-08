@@ -112,6 +112,26 @@ impl Default for Options {
     }
 }
 
+/// Saved export options of a project (look, music, titles); defaults when never saved.
+pub fn load_options(c: &rusqlite::Connection, project_id: i64) -> Options {
+    c.query_row("SELECT export_json FROM project_settings WHERE project_id = ?1", [project_id], |r| r.get::<_, String>(0))
+        .ok()
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default()
+}
+
+/// Checks and saves the export options of a project.
+pub fn save_options(c: &rusqlite::Connection, project_id: i64, o: &Options) -> Result<(), String> {
+    o.check()?;
+    c.execute(
+        "INSERT INTO project_settings (project_id, export_json) VALUES (?1, ?2)
+         ON CONFLICT (project_id) DO UPDATE SET export_json = excluded.export_json",
+        rusqlite::params![project_id, serde_json::to_string(o).unwrap()],
+    )
+    .map_err(crate::db::err)
+    .map(drop)
+}
+
 pub const TRANSITIONS: &[&str] = &["fade", "dissolve", "fadeblack", "smoothleft", "slideleft", "wipeleft", "circleopen"];
 pub const COLORS: &[&str] = &["none", "warm", "cool", "vivid", "cinematic", "bw", "vintage"];
 const FADE_MS: i64 = 600;
@@ -247,19 +267,20 @@ pub fn subtitles(segs: &[Segment], o: &Options, (w, h): (i64, i64)) -> Option<St
 /// Target integrated loudness for `Options::normalize` (phones / social media).
 pub const TARGET_LUFS: f64 = -16.0;
 
+/// Audio-only decode of an export; assumed generous limit (a 5 min export measures in seconds).
+const LUFS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Integrated loudness (LUFS) of a file's first audio stream (EBU R128).
 pub fn measure_lufs(env: &MediaEnv, file: &Path) -> Result<f64, String> {
-    let child = crate::process::command(&env.ffmpeg)
-        .args(["-hide_banner", "-nostdin", "-i"])
+    let mut cmd = crate::process::command(&env.ffmpeg);
+    cmd.args(["-hide_banner", "-nostdin", "-i"])
         .arg(file)
         .args(["-map", "0:a:0", "-af", "ebur128=framelog=quiet", "-f", "null", "-"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Cannot start FFmpeg: {e}"))?;
-    env.job_object.assign(&child)?;
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        .stderr(std::process::Stdio::piped());
+    let child = crate::process::spawn(&mut cmd, env.job_object).map_err(|e| format!("Cannot start FFmpeg: {e}"))?;
+    let out = crate::process::wait_output(child, LUFS_TIMEOUT, &|| false)?;
     let log = String::from_utf8_lossy(&out.stderr);
     log.lines()
         .rev()
@@ -287,7 +308,10 @@ pub fn level_loudness(env: &MediaEnv, out: &Path, cancelled: &dyn Fn() -> bool) 
         let _ = std::fs::remove_file(&leveled);
         return Err(e);
     }
-    std::fs::rename(&leveled, out).map_err(|e| RunError::Failed(format!("Cannot replace {}: {e}", out.display())))?;
+    if let Err(e) = std::fs::rename(&leveled, out) {
+        let _ = std::fs::remove_file(&leveled);
+        return Err(RunError::Failed(format!("Cannot replace {}: {e}", out.display())));
+    }
     Ok((before, gain))
 }
 
@@ -505,6 +529,24 @@ fn output_path(projects: &Path, project_id: i64, name: &str, preset: &str) -> Pa
     projects.join(project_id.to_string()).join("exports").join(format!("{}-{preset}-{now}.mp4", safe.trim()))
 }
 
+fn stem(p: &Path) -> String {
+    p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+/// `p` if no file has that name yet, else `name-2.mp4`, `name-3.mp4`, … — an earlier export is never replaced.
+fn free_name(p: &Path) -> PathBuf {
+    let s = stem(p);
+    (1..).map(|i| if i == 1 { p.to_path_buf() } else { p.with_file_name(format!("{s}-{i}.mp4")) }).find(|c| !c.exists()).unwrap()
+}
+
+/// Failures another encoder cannot fix (full disk, no write permission): retrying would render twice for nothing.
+fn storage_error(e: &str) -> bool {
+    let e = e.to_lowercase();
+    ["no space left", "not enough space", "disk full", "permission denied", "access is denied", "(os error 5)", "(os error 112)", "cannot create"]
+        .iter()
+        .any(|k| e.contains(k))
+}
+
 /// Renders with the hybrid QSV path, falling back to full software (logged).
 pub fn render(
     env: &MediaEnv,
@@ -558,6 +600,7 @@ fn render_with(
         match result {
             Ok(()) => return Ok(name),
             Err(RunError::Cancelled) => return Err(RunError::Cancelled),
+            Err(RunError::Failed(e)) if storage_error(&e) => return Err(RunError::Failed(e)),
             Err(RunError::Failed(e)) => {
                 tracing::warn!(path = name, error = %e, "export attempt failed, trying next");
                 last = e;
@@ -617,7 +660,9 @@ pub fn export_job(job: &Job, progress: &dyn Fn(u64, u64), cancelled: &dyn Fn() -
     if let Err(e) = o.check() {
         return Outcome::Failed(e);
     }
-    let out = output_path(projects, project_id, &name, preset_name);
+    let planned = output_path(projects, project_id, &name, preset_name);
+    // Rendered, levelled and validated under a temporary name; only then promoted to the final name.
+    let staging = planned.with_extension("unvalidated.mp4");
     let expected_ms = o.duration(&segs);
 
     // Library music: downloaded now, deleted when `_music` drops (after render + validation, any outcome).
@@ -648,17 +693,17 @@ pub fn export_job(job: &Job, progress: &dyn Fn(u64, u64), cancelled: &dyn Fn() -
     };
     // Rendering is ~85 % of the job, validation (a full decode) the rest.
     let started = Instant::now();
-    let encoder = match render(env, &segs, target, &o, &out, &|f| progress(50 + (f * 850.0) as u64, TOTAL), cancelled) {
+    let encoder = match render(env, &segs, target, &o, &staging, &|f| progress(50 + (f * 850.0) as u64, TOTAL), cancelled) {
         Ok(e) => e,
         Err(RunError::Cancelled) => return Outcome::Cancelled,
         Err(RunError::Failed(e)) => return Outcome::Failed(format!("Render failed: {e}")),
     };
     let mut loudness = serde_json::Value::Null;
     if o.normalize {
-        match level_loudness(env, &out, cancelled) {
+        match level_loudness(env, &staging, cancelled) {
             Ok((before, gain)) => loudness = json!({"measuredLufs": before, "gainDb": gain, "targetLufs": TARGET_LUFS}),
             Err(RunError::Cancelled) => {
-                let _ = std::fs::remove_file(&out);
+                let _ = std::fs::remove_file(&staging);
                 return Outcome::Cancelled;
             }
             Err(RunError::Failed(e)) => tracing::warn!(error = %e, "loudness pass failed; first-pass level kept"),
@@ -666,7 +711,12 @@ pub fn export_job(job: &Job, progress: &dyn Fn(u64, u64), cancelled: &dyn Fn() -
     }
     let render_seconds = started.elapsed().as_secs_f64();
     progress(900, TOTAL);
-    let validation = validate(env, &out, expected_ms, segs.len(), target);
+    let validation = validate(env, &staging, expected_ms, segs.len(), target);
+    // A file that failed validation is kept (the user may still want it) but never under the normal name.
+    let out = free_name(&if validation.ok { planned } else { planned.with_file_name(format!("{}-failed-validation.mp4", stem(&planned))) });
+    if let Err(e) = std::fs::rename(&staging, &out) {
+        return Outcome::Failed(format!("Cannot move the finished video to {}: {e} (it is still at {})", out.display(), staging.display()));
+    }
     progress(TOTAL, TOTAL);
     tracing::info!(project_id, preset = preset_name, encoder, render_seconds, ok = validation.ok, path = %out.display(), "export finished");
     Outcome::Completed(json!({
@@ -770,6 +820,28 @@ mod tests {
         let p = output_path(Path::new(r"E:\d\projects"), 3, "Đà Lạt: 2026/07?", "story");
         let name = p.file_name().unwrap().to_string_lossy().to_string();
         assert!(name.starts_with("Đà Lạt_ 2026_07_-story-") && name.ends_with(".mp4"), "{name}");
+    }
+
+    #[test]
+    fn earlier_exports_are_never_replaced() {
+        let dir = std::env::temp_dir().join(format!("memora-free-name-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("Trip-reels-100.mp4");
+        assert_eq!(free_name(&p), p);
+        std::fs::write(&p, "x").unwrap();
+        assert_eq!(free_name(&p), dir.join("Trip-reels-100-2.mp4"));
+        std::fs::write(dir.join("Trip-reels-100-2.mp4"), "x").unwrap();
+        assert_eq!(free_name(&p), dir.join("Trip-reels-100-3.mp4"));
+        assert_eq!(p.with_extension("unvalidated.mp4").file_name().unwrap(), "Trip-reels-100.unvalidated.mp4");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn storage_errors_are_not_retried() {
+        assert!(storage_error("FFmpeg exited with exit code: 1: av_interleaved_write_frame(): No space left on device"));
+        assert!(storage_error("Cannot write E:\\x.mp4: Access is denied. (os error 5)"));
+        assert!(storage_error("Error opening output E:\\x.part: Permission denied"));
+        assert!(!storage_error("FFmpeg exited with exit code: 1: Error initializing filter 'vpp_qsv'"));
     }
 
     /// Real FFmpeg: two sources (one rotated, one without audio), trimmed + concatenated, validated.
