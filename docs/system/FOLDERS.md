@@ -1,6 +1,6 @@
 # Folder structure
 
-Last verified: 2026-11-08 against commit `b751673`. Index: [README.md](README.md). Kept current by the `sync-docs` skill.
+Last verified: 2026-11-09 against commit `9ac182c` + uncommitted changes. Index: [README.md](README.md). Kept current by the `sync-docs` skill.
 
 ## 1. Repository (`E:\Memora Studio\`)
 
@@ -17,7 +17,7 @@ Memora Studio/
 │  ├─ index.html, vite.config.ts, tsconfig*.json, package.json, package-lock.json
 │  ├─ src/                       React + TypeScript frontend            → FRONTEND.md
 │  │  ├─ main.tsx, App.tsx, api.ts, index.css
-│  │  └─ Projects.tsx, EditingPlan.tsx, Timeline.tsx, MediaLibrary.tsx, AiCenter.tsx, Models.tsx
+│  │  └─ Projects.tsx, EditingPlan.tsx, Timeline.tsx, MediaLibrary.tsx, PhotoEditor.tsx, AiCenter.tsx, Models.tsx, ui.tsx, i18n.ts
 │  ├─ public/                    (empty)
 │  ├─ dist/                      frontend build output (generated)
 │  └─ src-tauri/                 Rust backend                            → BACKEND.md
@@ -32,7 +32,7 @@ Memora Studio/
 │     └─ target/                 cargo build output (debug/, release/memora-desktop.exe + memora-cli.exe)
 ├─ workers/ai-worker/            Python AI worker                        → WORKER.md
 │  ├─ memora_worker.py           protocol v1 + job table
-│  ├─ analysis.py, tagging.py    algorithms (each has a self-check: `python <file>.py`)
+│  ├─ analysis.py, tagging.py, photo.py   algorithms (each has a self-check: `python <file>.py`)
 │  ├─ requirements.lock.txt      pinned packages
 │  └─ .venv/                     dev runtime (not committed)
 ├─ tools/clip-export/            dev-only OpenCLIP → OpenVINO IR exporter (torch venv, not shipped)
@@ -64,6 +64,7 @@ Created by `settings::prepare_data_root`; everything the app writes lives here.
 │  ├─ whisper.cpp\b5454\                   whisper-cli.exe, whisper.dll, ggml*.dll
 │  └─ ai-worker\python\, app\              packaged worker (future installer; dev uses the repo venv)
 ├─ models\
+├─ music\<track id>.mp3                    free library music, downloaded once and kept (verified on every export)
 │  ├─ <category>\<id>\<version>\           installed models (vision\openclip-vit-b32\2\, speech\whisper-small\1\ …)
 │  └─ .downloads\<id>-<version>\           resumable downloads (*.part), kept after a crash
 ├─ cache\                                  the ONLY folder the webview may load files from
@@ -72,7 +73,10 @@ Created by `settings::prepare_data_root`; everything the app writes lives here.
 │  ├─ frames\<media id>\<scene>.jpg        scene representative frames
 │  ├─ audio\<media id>.wav|.json           temporary whisper input/output (deleted after each file)
 │  ├─ render\titles-<pid>-<nanos>.ass      temporary title/subtitle files (deleted after render)
-│  └─ downloads\sounds\                    library music for one export (deleted after the export)
+│  ├─ render\part-<pid>-<nanos>-<i>.mp4    parts of a long export (> 10 clips), deleted after render
+│  ├─ downloads\sounds\                    old location of library music (swept at start-up; no longer written)
+│  └─ photo\<photo id>\thumb.jpg | before.jpg | preview-<n>.jpg   photo editor thumbnails and previews
+├─ photos\exports\<name>-edit[-N].jpg      edited photos (never overwritten; written as .jpg.part, then renamed)
 ├─ projects\<project id>\exports\
 │  ├─ <name>-<preset>-<unix>[-N].mp4       finished exports (never overwritten)
 │  ├─ …-failed-validation.mp4              kept, but never under the normal name

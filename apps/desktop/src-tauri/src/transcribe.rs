@@ -37,6 +37,16 @@ pub struct Transcript {
     pub created_at: String,
 }
 
+impl Segment {
+    /// Whisper sometimes stretches a short line over a long stretch of wind/road noise (owner's Nam Cát Tiên
+    /// footage: "Tính ra lẹ chứ", 4 syllables, timed 22 s). Such timing is not trusted for cutting: a line may
+    /// last at most 3 s + 1 s per word (generous initial assumption, pauses included; normal Vietnamese speech
+    /// is ~0.2–0.3 s per syllable).
+    pub fn timing_plausible(&self) -> bool {
+        self.end_ms - self.start_ms <= 3_000 + 1_000 * self.text.split_whitespace().count() as i64
+    }
+}
+
 pub fn whisper_cli(data_root: &Path) -> PathBuf {
     data_root.join("runtime").join("whisper.cpp").join(WHISPER_DIR).join("whisper-cli.exe")
 }

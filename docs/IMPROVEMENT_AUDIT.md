@@ -110,7 +110,9 @@ Owner approved batches 1–5. **Done:** R6, R3, R4, R5, R2 (details and tests in
 
 Done on later owner requests (not audit items): `memora-cli` command-line tool, editing `Wishes` (prefer / less / avoid concepts, length, look, music, text) and the offline request box in Smart edit (owner chose keywords over a Claude API call). U2 is partly covered: plans now report windows left out by avoided concepts.
 
-**Still open:** R1 relink, E1 favourite guarantee (owner decision), E3, E4 per-join transitions, E5 tests, M1 HDR, M2 A/V check, M3 manual crop, M4 encoder report, A1–A4, V1 versions, U1/U3, docs items in section D (APP_OVERVIEW refreshed 2026-11-08).
+**Still open:** R1 relink, E1 favourite guarantee (owner decision), E3, E5 tests, M1 HDR, M2 A/V check, M3 manual crop, M4 encoder report, A1–A4, V1 versions, U1/U3, docs items in section D (APP_OVERVIEW refreshed 2026-11-08).
+
+E4 fixed 2026-11-11 (per-join clamp + `auto` transition, see PROGRESS).
 
 ## Found while writing docs/system (2026-11-08, not fixed)
 
@@ -127,6 +129,36 @@ Done on later owner requests (not audit items): `memora-cli` command-line tool, 
 | N9 | Worker | Dev fallback worker path is fixed at compile time (`CARGO_MANIFEST_DIR`); ADR 0002 says `runtime\ai-worker\<version>\`, code uses `runtime\ai-worker\python|app` | `worker::resolve`, ADR 0002 |
 | N10 | Docs/code comments | `editing.rs` `NO_MUSIC`/`NO_TITLES`, `transcribe.rs` VAD comment, `timeline.rs` "will produce", `models.rs` state list without `update_available` are stale | see BACKEND.md notes |
 | N11 | Data | `media.probe_json` is stored but never read; `media_analysis.version/quality` never read (see V1) | DATABASE.md |
+
+## Found while editing Nam Cát Tiên (2026-11-08)
+
+Owner request: a whole-trip recap that flows, a short vertical cut for Reels/TikTok/Story, original sound replaced or lowered. Library: 25 DJI Osmo Action 4 clips from one day (≈72 min, 2.7K HEVC 10-bit SDR). Edited with `memora-cli` like a user would; every edit was reviewed on a frame board (one frame per planned clip, from the proxies).
+
+| ID | Area | Finding | Evidence | Status |
+|---|---|---|---|---|
+| T1 | Styles | No style for a long whole-trip recap: `travel_cinematic` is 90 s with 3–6 s clips (choppy at 4 min), `travel_documentary` favours city/market and burns subtitles | `editing::styles` | **Fixed**: `journey_recap` (240 s, 4–9 s clips, trip order, dissolve 700 ms, warm, gentle/folk music); request words "tổng hợp", "hành trình", "cả chuyến đi", "recap" |
+| T2 | Audio | Clips' own sound averages ≈ −25 dBFS, above the ducking threshold (≈ −34 dBFS): with music and own sound at 1.0 the music stays ≈ 8 dB down for the whole video under road/wind noise | `volumedetect` on 4 clips; `sidechaincompress threshold=0.02` | **Fixed**: with music and no subtitles, applying a plan lowers own sound to 0.35 (natural bed; voices still duck the music) |
+| T3 | Transcripts | Whisper stretches short lines over long noise ("Đi, tớ ấy nơi rồi" 0:33→2:00, "Tính ra lẹ chứ" 22 s). Speech-safe cuts then grew cycling clips to 22–23 s and every window scored "speech 100 %" | `transcript 19`, `transcript 23` | **Fixed** in Editing Core: `Segment::timing_plausible` (≤ 3 s + 1 s per word) — implausible lines are ignored for cuts and the speech score. Display and subtitles unchanged |
+| T4 | Export memory | One FFmpeg run opens every original: 26 × 2.7K HEVC decoders peaked at **11 GB working set / 12 GB commit** (commit limit 34 GB, 2 GB pagefile) | process sampling during export | **Fixed**: `render_parts` — timelines over 10 clips render in parts from the originals (high-quality intermediates in `cache\render`, removed afterwards), then one joining pass adds look, text, music, loudness. Same recap: 5.2 GB / 5.6 GB, duration identical to the ms, render 149 s vs 121 s |
+| T5 | CLI | Favourite / exclude marks only in the UI | `cli.rs` | **Fixed**: `memora-cli mark MEDIA --favorite on|off --exclude on|off` |
+| T6 | Tagging | A finger close to the lens is sometimes tagged "selfie" instead of the negative "finger over the lens" (#2 at 1:15, selfie 61 %); 2 s windows can fall under the bad-shot threshold although the 5 s summary flags them | frame board, `scenes 2` | Open. Work-around: "bỏ selfie" in the request (the owner asked for it before too) |
+| T7 | Ranking | Nothing measures visual appeal: "rừng 98 %" windows of dull bushes outrank strong moments; the `social_story` hook was two people talking; the end of a long plan filled up with four clips of people waiting at the pier | plans 4 and 5 on the real library | Open. Reels were picked by hand (`clip-add`). Options: aesthetic prompt pair in the OpenCLIP export (needs dev-time torch), or a "short cut-down of an approved long plan" |
+| T8 | Vertical crop | Centre crop pushed the big tree to the edge at some times | 9:16 crop board | Open (= M3). Picked times with the subject centred |
+| T9 | File size | Default quality is large: recap 1.42 GB for 3:20 (≈57 Mbit/s), Reels 172 MB for 33 s (≈41 Mbit/s). Capping QSV at 16 Mbit/s (VBR) gives 1/3 the size but SSIM 0.99 → 0.94 on moving foliage | 20 s test encodes | Owner decision: a "for sharing" size (e.g. 12–16 Mbit/s for Story/Reels) vs. current archive-grade default |
+
+### Owner review round 2 (2026-11-09): recap 7/10, reel 7/10
+
+Owner: library music "nghe chẳng ra gì" (rather no music), the reel's music "như cướp biển"; the recap misses the special riding moments; the many shots where the owner sat up and filmed the whole road were replaced by near-identical shots of the camera tilted down at the handlebars; the reel does not cover the trip.
+
+| ID | Area | Finding | Evidence | Status |
+|---|---|---|---|---|
+| T10 | Camera framing | Nothing told "road and landscape ahead" from "camera tilted down at handlebars / ground"; the old negative "camera pointing at the ground" fired on 12 s of the whole library | 850 frames scored with a prompt pair: ≥ 0.5 = raised camera, < 0.05 = tilted down; walking/ferry/river 0.6–0.9 | **Fixed**: OpenCLIP model **v3** (same IR, new `cues` in `openclip_tags.json`, exported with the existing dev venv, installed via `memora-cli job models.install`); worker `cue_score`; `tagging::cue`; Editing Core leaves out windows < 0.1 ("camera pointing down", 466 windows in the recap plan) and ranks the rest × (0.6 + 0.7·view) |
+| T11 | Diversity | ×0.85 per clip of the same concept compounded without limit: after 8 riding clips a raised-camera riding shot scored 27 % and lost to people waiting at the pier | plan 4 trace | **Fixed**: `CONCEPT_REPEAT_MAX = 3` (the 35 % share cap still limits one concept) |
+| T12 | Request box | "chuyến đi đạp xe" was not read as the bicycle concept (only tag names matched) | `understand` | **Fixed**: `request::ALIASES` (đạp xe / cycling / biking → bicycle; đi bộ trong rừng / trekking / hiking → hiking trail) |
+| T13 | Sound | After "không nhạc" the clips' sound stayed at the 0.35 set for earlier music | `apply` output | **Fixed**: back to 1.0 when the level is the one set for music |
+| T14 | Music | Kevin MacLeod catalog judged poor; the library deleted tracks after each export | owner | **Fixed**: 10 Scott Buckley tracks (CC BY 4.0, pages checked, files measured) added; tracks kept in `<data root>\music\` (owner allowed 2 GB); CSP allows their previews. The owner still has to listen and choose (ADR 0005 amendment) |
+| T15 | Camera framing | "view ahead" < 0.1 on 87 % of riding samples (handlebar mount): forest trails, bridges and slopes left out; recap ran out of candidates | 2026-11-11 database read, frame boards | **Fixed**: OpenCLIP v4 scene cues + Editing Core exception on trails + coverage pass + auto length |
+| T7 | Ranking | Still open for short cuts: with 2 s windows almost every non-handlebar shot scores "view ahead"; dull bushes, a red bag filling the 9:16 crop and a hoodie back still entered the automatic reel plan (7 of 22 replaced by hand) | 9:16 board of plan 5 | Open: a visual-appeal cue (same prompt-pair mechanism) and a crop-aware check are the next candidates |
 
 ## E. Approval gate
 The owner chooses which items to implement, by ID or by batch number. Recommended first batch: **1–5 (R6, R3, R4, R5, R2)**. All are small, P0, and need no schema migration. No code is touched before that answer.

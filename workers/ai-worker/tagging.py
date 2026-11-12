@@ -56,6 +56,8 @@ def tag_video(path, model_dir, every_ms=2000, devices=("GPU", "CPU"), progress=N
     meta = json.loads((model_dir / "openclip_tags.json").read_text(encoding="utf-8"))
     text = np.array([t["embedding"] for t in meta["tags"]], np.float32)
     scale = float(meta["logitScale"])
+    cues = meta.get("cues", [])  # v3+: camera cues, each a prompt and its contrast
+    cue_pairs = [np.array([c["embedding"], c["contrast"]], np.float32) for c in cues]
     model, device, fallbacks = compile_model(model_dir / "openclip_image.xml", devices)
 
     cap = cv2.VideoCapture(str(path))
@@ -77,7 +79,8 @@ def tag_video(path, model_dir, every_ms=2000, devices=("GPU", "CPU"), progress=N
         prob = np.exp(logits - logits.max())
         prob /= prob.sum()
         top = prob.argsort()[::-1][:TOP_K]
-        samples.append({"atMs": at, "tags": [[int(k), round(float(prob[k]), 4)] for k in top]})
+        samples.append({"atMs": at, "tags": [[int(k), round(float(prob[k]), 4)] for k in top],
+                        "cues": [round(cue_score(pair, v, scale), 4) for pair in cue_pairs]})
         if progress:
             progress(i + 1, len(times))
     cap.release()
@@ -85,8 +88,15 @@ def tag_video(path, model_dir, every_ms=2000, devices=("GPU", "CPU"), progress=N
         "model": meta["model"], "device": device, "fallbacks": fallbacks, "everyMs": every_ms,
         "seconds": round(time.perf_counter() - t0, 2),
         "tags": [{"en": t["en"], "vi": t["vi"], "negative": bool(t.get("negative"))} for t in meta["tags"]],
+        "cues": [{"en": c["en"], "vi": c["vi"]} for c in cues],
         "samples": samples,
     }
+
+
+def cue_score(pair, v, scale):
+    """Probability of the cue prompt against its contrast (two-way softmax) for one normalised image embedding."""
+    a, b = (pair @ v * scale).astype(np.float64)
+    return float(1.0 / (1.0 + np.exp(min(b - a, 700.0))))
 
 
 if __name__ == "__main__":
@@ -95,4 +105,8 @@ if __name__ == "__main__":
         x = preprocess(np.full(shape, 128, np.uint8), p)
         assert x.shape == (1, 3, 224, 224) and x.dtype == np.float32, (shape, x.shape)
     assert abs(float(preprocess(np.full((300, 400, 3), 255, np.uint8), p)[0, 0, 0, 0]) - (1 - p["mean"][0]) / p["std"][0]) < 1e-5
+    pair = np.array([[1.0, 0.0], [0.0, 1.0]], np.float32)
+    assert cue_score(pair, np.array([1.0, 0.0], np.float32), 100.0) > 0.99
+    assert cue_score(pair, np.array([0.0, 1.0], np.float32), 100.0) < 0.01
+    assert abs(cue_score(pair, np.array([0.7071, 0.7071], np.float32), 100.0) - 0.5) < 1e-3
     print("tagging self-check OK")

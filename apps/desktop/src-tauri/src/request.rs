@@ -120,6 +120,7 @@ const AVOID_WORDS: &[&str] = &["bỏ", "bo", "không", "khong", "tránh", "trừ
 const LESS_WORDS: &[&str] = &["bớt", "ít", "less", "fewer", "fewer of"];
 
 const STYLES: &[(&str, &[&str])] = &[
+    ("journey_recap", &["tổng hợp", "tong hop", "hành trình", "hanh trinh", "cả chuyến đi", "ca chuyen di", "recap", "journey"]),
     ("travel_cinematic", &["cinematic", "điện ảnh", "dien anh"]),
     ("memory_nostalgia", &["hoài niệm", "hoai niem", "kỷ niệm", "ky niem", "nostalgia", "nostalgic", "memories"]),
     ("travel_documentary", &["tài liệu", "tai lieu", "documentary", "vlog", "kể chuyện", "ke chuyen"]),
@@ -142,7 +143,16 @@ const MUSIC: &[(&str, &[&str])] = &[
     ("medium", &["nhạc vui", "nhac vui", "vui tươi", "vui tuoi", "happy music"]),
     ("any", &["có nhạc", "co nhac", "nhạc nền", "nhac nen", "nhạc", "music"]),
 ];
-const NATURE: &[&str] = &["thiên nhiên", "thien nhien", "phong cảnh", "phong canh", "nature", "scenery", "landscapes"];
+/// Extra words for a tag (`en` name) besides its English / Vietnamese names.
+const ALIASES: &[(&str, &[&str])] = &[
+    ("bicycle", &["đạp xe", "dap xe", "cycling", "biking"]),
+    ("hiking trail", &["đi bộ trong rừng", "di bo trong rung", "trekking", "hiking"]),
+    // Scene cues (OpenCLIP model v4), owner's words 2026-11-11.
+    ("forest trail", &["đường rừng", "duong rung", "đường nhỏ giữa rừng", "đường mòn trong rừng", "forest path"]),
+    ("small bridge", &["qua cầu", "qua cau", "cầu nhỏ", "cau nho", "bridge"]),
+    ("slope", &["lên dốc", "len doc", "xuống dốc", "xuong doc", "đường dốc", "duong doc", "uphill", "downhill"]),
+];
+const NATURE: &[&str] =&["thiên nhiên", "thien nhien", "phong cảnh", "phong canh", "nature", "scenery", "landscapes"];
 
 /// Concept class from the words before it in its clause: "bỏ selfie" → avoid, "bớt xe đạp" → less.
 fn class(t: &Text, at: usize) -> &'static str {
@@ -288,6 +298,8 @@ pub fn parse(text: &str, vocab: &[TagName]) -> Request {
             if n.vi.contains(' ') || n.vi.chars().count() >= 5 {
                 needles.push(fold(&n.vi));
             }
+            // Verbs people use for the activity (owner's "chuyến đi đạp xe" was not read as bicycle).
+            needles.extend(ALIASES.iter().filter(|(en, _)| *en == n.en).flat_map(|(_, a)| a.iter().map(|s| s.to_string())));
             (n.en.clone(), needles)
         })
         .collect();
@@ -380,6 +392,16 @@ mod tests {
     }
 
     #[test]
+    fn trail_scenes_by_the_owners_words() {
+        let mut v = vocab();
+        v.extend([("forest trail", "đường mòn trong rừng"), ("small bridge", "qua cầu nhỏ"), ("slope", "đường dốc trong rừng")]
+            .iter().map(|(e, vi)| TagName { en: (*e).into(), vi: (*vi).into(), negative: false }));
+        let r = parse("tổng hợp chuyến đi, nhiều cảnh đường rừng, lên dốc, qua cầu", &v);
+        assert_eq!(r.wishes.prefer, ["forest trail", "slope", "small bridge"], "{:?}", r.understood);
+        assert_eq!(r.wishes.target_ms, None, "no length named: the recap picks one from the footage");
+    }
+
+    #[test]
     fn owner_style_request_in_vietnamese() {
         let r = parse("Video dọc 30 giây, nhiều cảnh cây cổ thụ và đường mòn, bỏ selfie, bớt xe đạp, tông ấm, nhạc nhẹ, tiêu đề: \"Đà Lạt 2026\"", &vocab());
         let w = &r.wishes;
@@ -398,6 +420,10 @@ mod tests {
         assert_eq!(w.prefer, ["mountain", "sea", "beach", "forest"], "nature = the landscape concepts the library knows");
         assert_eq!((r.from.as_deref(), r.to.as_deref()), (Some("2026-02-01"), Some("2026-02-31")));
         assert_eq!(r.style, None, "no style word: the selected style is kept");
+        assert_eq!(parse("video tổng hợp cả chuyến đi, 4 phút", &vocab()).style.as_deref(), Some("journey_recap"));
+        assert_eq!(parse("hanh trinh dap xe", &vocab()).style.as_deref(), Some("journey_recap"));
+        assert_eq!(parse("tổng hợp chuyến đi đạp xe", &vocab()).wishes.prefer, ["bicycle"], "the activity verb names the concept");
+        assert_eq!(parse("bớt đạp xe", &vocab()).wishes.less, ["bicycle"]);
     }
 
     #[test]

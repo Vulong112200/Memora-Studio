@@ -29,6 +29,9 @@ pub struct TagSample {
     pub at_ms: i64,
     /// (index into the tag list, probability), best first.
     pub tags: Vec<(usize, f64)>,
+    /// Camera cue probabilities, same order as `MediaTags::cues` (model v3+; empty for older tags).
+    #[serde(default)]
+    pub cues: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,7 +39,18 @@ pub struct TagSample {
 pub struct MediaTags {
     pub device: String,
     pub tags: Vec<TagName>,
+    /// Camera cues ("view ahead" since model v3): how the shot is framed, not what it shows.
+    #[serde(default)]
+    pub cues: Vec<TagName>,
     pub samples: Vec<TagSample>,
+}
+
+/// Mean probability of camera cue `en` over the samples in [start_ms, end_ms); None when the media was tagged
+/// with a model without that cue or no sample falls inside.
+pub fn cue(t: &MediaTags, en: &str, start_ms: i64, end_ms: i64) -> Option<f64> {
+    let k = t.cues.iter().position(|c| c.en == en)?;
+    let v: Vec<f64> = t.samples.iter().filter(|s| s.at_ms >= start_ms && s.at_ms < end_ms).filter_map(|s| s.cues.get(k).copied()).collect();
+    (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -237,7 +251,7 @@ mod tests {
     /// Real worker + real exported IR (skipped when the export or FFmpeg is missing).
     #[test]
     fn tag_job_with_real_worker_and_ir() {
-        let ir = std::path::PathBuf::from(r"E:\Memora Data\downloads\openclip-export-v2");
+        let ir = std::path::PathBuf::from(r"E:\Memora Data\downloads\openclip-export-v4");
         let (ffprobe, ffmpeg) = (media::tool_path(None, "ffprobe.exe"), media::tool_path(None, "ffmpeg.exe"));
         if !ir.join("openclip_image.xml").exists() || !ffmpeg.exists() || crate::worker::resolve(None).is_err() {
             eprintln!("skipped: exported IR, FFmpeg or worker venv not found");
@@ -268,6 +282,9 @@ mod tests {
         assert_eq!(t.samples.len(), 3, "samples at 0, 2, 4 s");
         assert!(t.tags.iter().filter(|x| x.negative).count() == 4, "bad-shot detectors shipped");
         assert!(t.samples.iter().all(|s| s.tags.len() == 5 && s.tags.iter().all(|&(k, p)| k < t.tags.len() && (0.0..=1.0).contains(&p))));
+        assert_eq!(t.cues.iter().map(|c| c.en.as_str()).collect::<Vec<_>>(), ["view ahead", "forest trail", "small bridge", "slope"], "camera and scene cues shipped (v4)");
+        assert!(t.samples.iter().all(|s| s.cues.len() == 4 && s.cues.iter().all(|c| (0.0..=1.0).contains(c))));
+        assert!(cue(&t, "view ahead", 0, 6_000).is_some() && cue(&t, "nope", 0, 6_000).is_none());
         drop(ai);
         std::fs::remove_dir_all(dir).unwrap();
     }

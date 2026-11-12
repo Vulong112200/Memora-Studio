@@ -105,6 +105,18 @@ const MIGRATIONS: &[&str] = &[
         project_id   INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
         export_json  TEXT NOT NULL
     );",
+    // 10: photo editor (ADR 0006): photos read in place, non-destructive edit stack per photo
+    "CREATE TABLE photos (
+        id            INTEGER PRIMARY KEY,
+        path          TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        size          INTEGER NOT NULL,
+        modified_unix INTEGER,
+        width         INTEGER,
+        height        INTEGER,
+        taken_at      TEXT,
+        edits_json    TEXT,
+        imported_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );",
 ];
 
 pub fn err(e: rusqlite::Error) -> String {

@@ -21,7 +21,8 @@ Library
   concepts                        concepts found in the library (seconds on screen)
   scenes MEDIA                    scenes with scores and concepts every 5 s
   transcript MEDIA                speech segments
-  job KIND [JSON]                 media.import|proxy|analyze|tag|transcribe, e.g. job media.analyze '{\"ids\":[3]}'
+  mark MEDIA [--favorite on|off] [--exclude on|off]   ★ favorites are preferred by plans, ⊘ never used
+  job KIND [JSON]                 media.import|proxy|analyze|tag|transcribe, models.install (offline: {\"id\":…,\"files\":{name: path}}), e.g. job media.analyze '{\"ids\":[3]}'
 Projects
   projects | new-project NAME
   styles
@@ -175,6 +176,18 @@ fn dispatch(ctx: &Ctx, a: &Args) -> Result<String, String> {
         "concepts" => ctx.with(concepts),
         "scenes" => ctx.with(|c| scenes(c, a.id(1, "MEDIA")?)),
         "transcript" => ctx.with(|c| transcript(c, a.id(1, "MEDIA")?)),
+        "mark" => ctx.with(|c| {
+            let id = a.id(1, "MEDIA")?;
+            let mut m = editing::marks(c)?.get(&id).copied().unwrap_or_default();
+            if let Some(v) = a.flags.get("favorite") {
+                m.favorite = on(v)?;
+            }
+            if let Some(v) = a.flags.get("exclude") {
+                m.excluded = on(v)?;
+            }
+            editing::set_mark(c, id, m)?;
+            Ok(format!("#{id} favorite {}, excluded {}\n", m.favorite, m.excluded))
+        }),
         "projects" => ctx.with(|c| {
             Ok(projects::list(c)?
                 .iter()
@@ -280,7 +293,7 @@ fn dispatch(ctx: &Ctx, a: &Args) -> Result<String, String> {
         }
         "job" => {
             let kind = a.arg(1, "KIND")?;
-            if !["media.import", "media.proxy", "media.analyze", "media.tag", "media.transcribe"].contains(&kind) {
+            if !["media.import", "media.proxy", "media.analyze", "media.tag", "media.transcribe", "models.install"].contains(&kind) {
                 return Err(format!("unknown job kind: {kind}"));
             }
             let params = a.pos.get(2).map(|p| serde_json::from_str(p).map_err(|e| format!("JSON: {e}"))).transpose()?.unwrap_or(Value::Null);
@@ -414,6 +427,9 @@ fn show_plan(c: &Connection, project: i64) -> Result<String, String> {
             (cl.out_ms - cl.in_ms) as f64 / 1000.0, cl.rank, cl.reasons.join("; ")
         );
     }
+    for n in &p.notes {
+        out += &format!("note: {n}\n");
+    }
     for s in &p.skipped {
         out += &format!("skipped: {s}\n");
     }
@@ -424,9 +440,9 @@ fn show_timeline(c: &Connection, project: i64) -> Result<String, String> {
     let clips = timeline::list(c, project)?;
     let files = names(c)?;
     let o = export::load_options(c, project);
-    let shortest = clips.iter().map(|x| x.out_ms - x.in_ms).min().unwrap_or(0);
-    let d = if clips.len() < 2 { 0 } else { o.transition_ms.clamp(0, shortest / 2) };
-    let total = clips.iter().map(|x| x.out_ms - x.in_ms).sum::<i64>() - (clips.len() as i64 - 1).max(0) * d;
+    let recorded: HashMap<i64, Option<String>> = media::list(c)?.into_iter().map(|m| (m.id, m.probe.source_created_at)).collect();
+    let jc: Vec<export::JoinClip> = clips.iter().map(|x| (x.media_id, recorded.get(&x.media_id).and_then(|r| r.as_deref()), x.in_ms, x.out_ms)).collect();
+    let total = clips.iter().map(|x| x.out_ms - x.in_ms).sum::<i64>() - export::joins(&o.transition, o.transition_ms, &jc).iter().map(|j| j.1).sum::<i64>();
     let mut out = format!("timeline #{project} — {} clips, {:.1} s\n", clips.len(), total as f64 / 1000.0);
     for x in &clips {
         let concept = tagging::get(c, x.media_id)?.map(|tg| top(&tagging::summarize(&tg, x.in_ms, x.out_ms, 0.1), 1)).unwrap_or_default();

@@ -45,6 +45,30 @@ NEGATIVE = [
     ("camera pointing at the ground", "quay xuống đất", "an accidental photo of the ground or pavement"),
     ("too dark", "quá tối", "an almost black, very dark photo"),
 ]
+# Camera cues (v3, owner feedback 2026-11-08): scored as a two-way softmax between a prompt and its contrast,
+# separately from the tag list (mixing them into the 52-way softmax dilutes them). Checked on 850 frames of the
+# owner's Nam Cát Tiên footage: "view ahead" ≥ 0.5 = camera raised, road and landscape visible; < 0.05 =
+# camera tilted down at handlebars and the ground; walking / ferry / river shots score 0.6–0.9.
+CUES = [
+    ("view ahead", "thấy đường phía trước",
+     "a first-person photo from a bicycle showing the road far ahead and the landscape",
+     "a photo looking down at bicycle handlebars and the ground right in front of the wheel"),
+    # v4 (owner feedback 2026-11-11: forest trails, small bridges and slopes were missing — "view ahead" scored
+    # 87 % of the riding samples < 0.1 because handlebars are always in frame). Checked on 1 010 frames (one per
+    # 4 s) of the Nam Cát Tiên footage: forest trail ≥ 0.9 = dirt path / forest road, paved open road 0.01–0.4;
+    # small bridge ≥ 0.6 = log and plank crossings (river views also score high, so the Editing Core requires the
+    # forest trail cue too); slope ≥ 0.95 = pushing bikes up forest paths, steep trail sections. "Leaf-covered
+    # path" and "ground only" prompt pairs did not separate and were left out.
+    ("forest trail", "đường mòn trong rừng",
+     "a first-person photo riding a bicycle on a narrow dirt path through a dense green forest",
+     "a first-person photo riding a bicycle on a wide paved road in the open"),
+    ("small bridge", "qua cầu nhỏ",
+     "a photo of a small bridge over a stream in the forest",
+     "a photo of a path in the forest without any bridge"),
+    ("slope", "đường dốc trong rừng",
+     "a photo of a steep dirt path going up or down a hill",
+     "a photo of a flat level path"),
+]
 MODEL = "ViT-B-32"
 
 
@@ -64,6 +88,8 @@ def main(ckpt, out, frames=None):
     with torch.no_grad():
         t = model.encode_text(tokenizer([TEMPLATE.format(en) for en, _ in TAGS] + [prompt for _, _, prompt in NEGATIVE]))
         t = torch.nn.functional.normalize(t, dim=-1).numpy()
+        cue = torch.nn.functional.normalize(model.encode_text(tokenizer([p for c in CUES for p in c[2:]])), dim=-1).numpy()
+    emb = lambda e: [round(float(x), 6) for x in e]
     (out / "openclip_tags.json").write_text(json.dumps({
         "model": f"{MODEL} laion2b_s34b_b79k", "template": TEMPLATE, "logitScale": float(model.logit_scale.exp()),
         "preprocess": {"size": 224, "resize": "shortest side, bicubic, center crop",
@@ -71,6 +97,8 @@ def main(ckpt, out, frames=None):
         "tags": [{"en": en, "vi": vi, "embedding": [round(float(x), 6) for x in e]} for (en, vi), e in zip(TAGS, t)]
         + [{"en": en, "vi": vi, "negative": True, "embedding": [round(float(x), 6) for x in e]}
            for (en, vi, _), e in zip(NEGATIVE, t[len(TAGS):])],
+        "cues": [{"en": en, "vi": vi, "embedding": emb(cue[2 * i]), "contrast": emb(cue[2 * i + 1])}
+                 for i, (en, vi, _, _) in enumerate(CUES)],
     }, ensure_ascii=False), encoding="utf-8")
 
     # Consistency: IR (as installed, FP16 weights) vs PyTorch CPU.

@@ -47,7 +47,11 @@ pub struct Style {
 }
 
 pub(crate) const LANDSCAPES: &[&str] = &["aerial view", "mountain", "sea", "beach", "sky and clouds", "sunrise", "lake", "waterfall", "rice field", "forest"];
-const PEOPLE: &[&str] = &["people", "group of friends", "family", "child", "selfie"];
+const JOURNEY: &[&str] = &[
+    "aerial view", "mountain", "sky and clouds", "sunrise", "sunset", "lake", "river", "waterfall", "rice field", "forest",
+    "hiking trail", "big tree", "bicycle", "group of friends", "boat", "forest trail", "small bridge", "slope",
+];
+const PEOPLE: &[&str] =&["people", "group of friends", "family", "child", "selfie"];
 const NO_MUSIC: &str = "Original audio only. Background music is not available yet: no licensed offline music source has been chosen (open requirement).";
 const NO_TITLES: &str = "No burned-in titles yet: Vietnamese title rendering (libass/freetype) is still to be validated.";
 
@@ -88,6 +92,17 @@ pub fn styles() -> Vec<Style> {
             weights: [0.3, 0.25, 0.35, 0.1], favor: &["city street", "market", "temple", "church", "building", "restaurant", "mountain", "sea", "hiking trail", "road trip on a highway"],
             open_with: &["aerial view", "mountain", "city street", "sea"], end_with: &[],
             transition: "fade", color: "none", captions: true,
+        },
+        Style {
+            // Owner request 2026-11-08 (Nam Cát Tiên trip): a long recap of a whole trip that flows, no choppy cuts.
+            id: "journey_recap", name: "Journey Recap", target_ms: 300_000, export_preset: "landscape",
+            clip_min_ms: 4_000, clip_max_ms: 9_000, clip_ideal_ms: 6_000, transition_ms: 700,
+            music: NO_MUSIC, titles: NO_TITLES, pacing: "Chronological, unhurried; the whole trip in order",
+            opening: "Chronological start", ending: "Chronological end",
+            weights: [0.4, 0.35, 0.1, 0.15], favor: JOURNEY,
+            open_with: &[], end_with: &[],
+            // "auto": short cross dissolves inside a shot, longer ones between places, dip to black between parts of the day.
+            transition: "auto", color: "warm", captions: false,
         },
         Style {
             id: "clean_minimal", name: "Clean Minimal", target_ms: 60_000, export_preset: "landscape",
@@ -242,6 +257,9 @@ pub struct Plan {
     /// Title proposal from the main concept and the recording dates (the user edits it before export).
     #[serde(default)]
     pub suggested_title: String,
+    /// How the plan was built where it is not obvious (length chosen from the footage, scenes kept for coverage).
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 const SCENE_TAG_MIN: f64 = 0.1;
@@ -294,6 +312,30 @@ const PREFER_BOOST: f64 = 0.5;
 /// Most a "less of" concept can lower a window's rank (×0.5 when the concept fills the window).
 const LESS_CUT: f64 = 0.5;
 
+/// Camera cue (OpenCLIP model v3): the road and landscape ahead are visible, as opposed to the camera tilted down
+/// at the handlebars and the ground (owner feedback 2026-11-08: "the shots where I sat up and filmed the whole
+/// road, not the same shots of the camera pointing down").
+const VIEW_CUE: &str = "view ahead";
+/// Below this the camera points down at the handlebars / ground and the window is left out (checked on 850
+/// frames of the owner's footage; initial value).
+const VIEW_DOWN: f64 = 0.1;
+
+/// Rank factor from the "view ahead" cue for the windows kept: ×0.67 just above `VIEW_DOWN`, ×1.3 for a full
+/// view (linear). Initial values from one library; walking, ferry and river shots score 0.6–0.9.
+fn view_factor(v: f64) -> f64 {
+    0.6 + 0.7 * v.clamp(0.0, 1.0)
+}
+
+/// Scene cues (OpenCLIP model v4, owner feedback 2026-11-11: "no forest paths, uphill, small bridges, downhill
+/// through the leaves"): (cue, threshold), checked in this order. Handlebars are always in frame on the owner's
+/// rides, so "view ahead" alone scored these < 0.1 and left them out. Thresholds from 1 010 frames of one library
+/// (initial values): forest trail ≥ 0.9 = dirt path / forest road (paved open road 0.01–0.4); small bridge and slope
+/// also fire on river views and the big-tree clearing, so they count only on a forest trail.
+pub(crate) const SCENE_CUES: &[(&str, f64)] = &[("small bridge", 0.6), ("slope", 0.95), ("forest trail", 0.9)];
+const FOREST_TRAIL: &str = "forest trail";
+/// Main concepts a scene cue may replace (a ride or walk); a big tree or people on a trail keep their own concept.
+const ON_THE_MOVE: &[&str] = &["bicycle", "motorbike", "hiking trail", "forest", "park", "road trip on a highway"];
+
 fn named(t: &tagging::TagScore, names: &[String]) -> bool {
     names.iter().any(|n| n.trim().eq_ignore_ascii_case(&t.en) || n.trim().to_lowercase() == t.vi.to_lowercase())
 }
@@ -336,11 +378,15 @@ fn window_hash(sc: &ScoredScene, a: i64, b: i64) -> Option<String> {
     sc.scene.samples.iter().min_by_key(|s| (s.at_ms - mid).abs()).map(|s| s.dhash.clone())
 }
 
-/// Candidate windows of one file, and how many were left out because of `wishes.avoid`.
-fn candidates(src: &Source, st: &Style, wishes: &Wishes) -> (Vec<Candidate>, usize) {
+/// Candidate windows of one file, and how many were left out because of `wishes.avoid` and because the
+/// camera points down at the handlebars / ground ("view ahead" cue below `VIEW_DOWN`).
+fn candidates(src: &Source, st: &Style, wishes: &Wishes) -> (Vec<Candidate>, usize, usize) {
     let mut out = vec![];
-    let mut avoided = 0;
-    let speech: Vec<(i64, i64)> = src.transcript.as_ref().map_or(vec![], |t| t.segments.iter().map(|s| (s.start_ms, s.end_ms)).collect());
+    let (mut avoided, mut tilted) = (0, 0);
+    let speech: Vec<(i64, i64)> = src
+        .transcript
+        .as_ref()
+        .map_or(vec![], |t| t.segments.iter().filter(|s| s.timing_plausible()).map(|s| (s.start_ms, s.end_ms)).collect());
     for sc in &src.scenes {
         let mut seen = HashSet::new();
         let fitted = windows(sc.scene.start_ms, sc.scene.end_ms, st)
@@ -353,7 +399,27 @@ fn candidates(src: &Source, st: &Style, wishes: &Wishes) -> (Vec<Candidate>, usi
                 avoided += 1;
                 continue;
             }
-            let (bad, tags): (Vec<_>, Vec<_>) = all.into_iter().partition(|t| t.negative);
+            let cue = |name: &str| src.tags.as_ref().and_then(|t| tagging::cue(t, name, a, b));
+            let view = cue(VIEW_CUE);
+            let forest = cue(FOREST_TRAIL).unwrap_or(0.0);
+            let on_trail = SCENE_CUES.iter().any(|&(n, min)| n == FOREST_TRAIL && forest >= min);
+            // Owner feedback 2026-11-08: tilted-down riding shots are left out, not used to fill the target —
+            // except on forest trails (2026-11-11), where the trail itself is the subject.
+            if view.is_some_and(|v| v < VIEW_DOWN) && !on_trail {
+                tilted += 1;
+                continue;
+            }
+            let (bad, mut tags): (Vec<_>, Vec<_>) = all.into_iter().partition(|t| t.negative);
+            // A ride or walk on a trail is shown as its scene (bridge / slope / forest trail): its own concept for the
+            // share cap, diversity and the request box, instead of one more "bicycle" clip.
+            let scene = SCENE_CUES
+                .iter()
+                .filter(|_| on_trail && tags.first().is_none_or(|t| ON_THE_MOVE.contains(&t.en.as_str())))
+                .find_map(|&(n, min)| cue(n).filter(|&s| s >= min).map(|s| (n, s)))
+                .and_then(|(n, s)| src.tags.as_ref()?.cues.iter().find(|c| c.en == n).map(|c| tagging::TagScore { en: c.en.clone(), vi: c.vi.clone(), score: s, negative: false }));
+            if let Some(s) = scene {
+                tags.insert(0, s);
+            }
             let wanted: Vec<_> = tags.iter().filter(|t| named(t, &wishes.prefer)).collect();
             let prefer = 1.0 + PREFER_BOOST * (2.0 * wanted.iter().map(|t| t.score).sum::<f64>()).min(1.0);
             let fewer: Vec<_> = tags.iter().filter(|t| named(t, &wishes.less)).collect();
@@ -363,17 +429,20 @@ fn candidates(src: &Source, st: &Style, wishes: &Wishes) -> (Vec<Candidate>, usi
                 (Some(_), true) => tags.first().map_or(0.0, |t| t.score),
                 (Some(_), false) => 0.5 * tags.first().map_or(0.0, |t| t.score) + 0.5 * (2.0 * tag_score(&tags, st.favor)).min(1.0),
             };
-            let speech = src.transcript.as_ref().map_or(0.0, |t| {
-                t.segments.iter().map(|s| overlap(a, b, s.start_ms, s.end_ms)).sum::<i64>() as f64 / (b - a) as f64
-            });
+            let speech = speech.iter().map(|&(s, e)| overlap(a, b, s, e)).sum::<i64>() as f64 / (b - a) as f64;
             let scores = Scores { technical: window_technical(sc, a, b), semantic, speech: speech.min(1.0), favorite: if src.favorite { 1.0 } else { 0.0 } };
             let w = st.weights;
             // Bad shot (finger over the lens, accidental ground shot…): up to −80 %, never chosen as a hook.
             let bad_score: f64 = bad.iter().map(|t| t.score).sum();
             let rank = (w[0] * scores.technical + w[1] * scores.semantic + w[2] * scores.speech + w[3] * scores.favorite)
                 * (1.0 - (BAD_SHOT_WEIGHT * bad_score).min(0.8))
-                * prefer;
+                * prefer
+                // A forest trail counts as a partial view (×1.0 at 100 %): raised-camera shots still rank first.
+                * view.map_or(1.0, |v| view_factor(v.max(if on_trail { 0.57 * forest } else { 0.0 })));
             let mut reasons = vec![format!("technical {:.0}", scores.technical * 100.0)];
+            if let Some(v) = view.filter(|&v| v >= 0.5) {
+                reasons.push(format!("thấy đường phía trước {:.0}%", v * 100.0));
+            }
             if let Some(t) = tags.first() {
                 reasons.push(format!("{} ({:.0}%)", t.vi, t.score * 100.0));
             }
@@ -413,15 +482,19 @@ fn candidates(src: &Source, st: &Style, wishes: &Wishes) -> (Vec<Candidate>, usi
             });
         }
     }
-    (out, avoided)
+    (out, avoided, tilted)
 }
 
-/// Diversity: each already chosen clip with the same dominant concept ×0.85, from the same file ×0.9,
+/// Diversity: each already chosen clip with the same dominant concept ×0.85 (at most `CONCEPT_REPEAT_MAX` times:
+/// the share cap `MAX_CONCEPT_SHARE` already limits one concept, and an unbounded penalty buried the trip's main
+/// activity under weaker shots — owner feedback 2026-11-08, Nam Cát Tiên), from the same file ×0.9,
 /// and ×0.6 for each chosen clip of the same file closer than 3 ideal clip lengths (spreads picks over
 /// long continuous shots instead of taking consecutive windows).
 // ponytail: greedy O(n²) over candidates; fine for a few thousand windows, revisit for whole-year libraries.
+const CONCEPT_REPEAT_MAX: i32 = 3;
+
 fn diversity(c: &Candidate, chosen: &[&Candidate], ideal_ms: i64) -> f64 {
-    let same_tag = chosen.iter().filter(|x| x.dominant.is_some() && x.dominant == c.dominant).count() as i32;
+    let same_tag = (chosen.iter().filter(|x| x.dominant.is_some() && x.dominant == c.dominant).count() as i32).min(CONCEPT_REPEAT_MAX);
     let same_media: Vec<_> = chosen.iter().filter(|x| x.clip.media_id == c.clip.media_id).collect();
     let near = same_media
         .iter()
@@ -493,12 +566,31 @@ pub fn plan(st: &Style, sources: &[Source]) -> Plan {
     plan_with(st, sources, &Wishes::default())
 }
 
+/// Whole-trip recap length from the footage when the user names none (owner 2026-11-11: "3 minutes feels short,
+/// about 5 minutes for this trip, or what the footage needs"): seconds of video per minute of footage, and limits.
+/// Initial values from one trip (72 min of footage → ~5 min).
+const RECAP_S_PER_FOOTAGE_MIN: f64 = 4.2;
+const RECAP_MIN_MS: i64 = 90_000;
+const RECAP_MAX_MS: i64 = 360_000;
+/// Coverage (journey recap): every concept with at least this much candidate footage gets a clip, and so does
+/// every slice of recording time of this length (owner: the trip's forest paths and bridges must be in).
+const COVER_CONCEPT_MS: i64 = 20_000;
+const COVER_SLICE_MS: i64 = 8 * 60_000;
+
 /// Plan for `st` with the user's wishes (preferred / avoided concepts, length).
 pub fn plan_with(st: &Style, sources: &[Source], wishes: &Wishes) -> Plan {
-    let st = &Style { target_ms: wishes.target_ms.filter(|&t| t > 0).unwrap_or(st.target_ms), ..st.clone() };
+    let mut notes = vec![];
+    let journey = st.id == "journey_recap";
+    let auto_ms = (journey && wishes.target_ms.is_none_or(|t| t <= 0)).then(|| {
+        let footage: i64 = sources.iter().filter(|s| !s.excluded && !s.scenes.is_empty()).map(|s| s.media.probe.duration_ms).sum();
+        let ms = ((footage as f64 / 60_000.0 * RECAP_S_PER_FOOTAGE_MIN * 1000.0) as i64).clamp(RECAP_MIN_MS, RECAP_MAX_MS);
+        notes.push(format!("length {} chosen from {} min of footage (say \"N phút\" to change it)", clock(ms), footage / 60_000));
+        ms
+    });
+    let st = &Style { target_ms: wishes.target_ms.filter(|&t| t > 0).or(auto_ms).unwrap_or(st.target_ms), ..st.clone() };
     let mut skipped = vec![];
     let mut pool = vec![];
-    let mut avoided = 0;
+    let (mut avoided, mut tilted) = (0, 0);
     for s in sources {
         let name = s.media.path.rsplit(['\\', '/']).next().unwrap_or(&s.media.path).to_string();
         if s.excluded {
@@ -506,9 +598,10 @@ pub fn plan_with(st: &Style, sources: &[Source], wishes: &Wishes) -> Plan {
         } else if s.scenes.is_empty() {
             skipped.push(format!("{name}: not analysed yet"));
         } else {
-            let (c, a) = candidates(s, st, wishes);
+            let (c, a, down) = candidates(s, st, wishes);
             avoided += a;
-            if c.is_empty() && a == 0 {
+            tilted += down;
+            if c.is_empty() && a == 0 && down == 0 {
                 skipped.push(format!("{name}: no scene long enough for this style"));
             }
             pool.extend(c);
@@ -517,19 +610,77 @@ pub fn plan_with(st: &Style, sources: &[Source], wishes: &Wishes) -> Plan {
     if avoided > 0 {
         skipped.push(format!("{avoided} windows left out: they show {}", wishes.avoid.join(", ")));
     }
+    if tilted > 0 {
+        skipped.push(format!("{tilted} windows left out: camera pointing down at the handlebars / ground"));
+    }
     let candidates = pool.len();
 
     let mut chosen: Vec<&Candidate> = vec![];
     let mut used: HashSet<(i64, i64)> = HashSet::new(); // (media, scene) already represented
-    let mut concept_ms: HashMap<&str, i64> = HashMap::new();
     let share_ms = (st.target_ms as f64 * MAX_CONCEPT_SHARE) as i64;
     let mut total = 0;
+    let eligible = |c: &Candidate, chosen: &[&Candidate], used: &HashSet<(i64, i64)>| {
+        !chosen.iter().any(|x| x.clip.media_id == c.clip.media_id && overlap(x.clip.in_ms, x.clip.out_ms, c.clip.in_ms, c.clip.out_ms) > 0)
+            && !c.duplicates.iter().any(|d| used.contains(d))
+            && new_content(c, chosen)
+    };
+    let take = |c: &'_ Candidate, total: &mut i64, concept_ms: &mut HashMap<String, i64>, used: &mut HashSet<(i64, i64)>| {
+        *total += c.clip.out_ms - c.clip.in_ms;
+        if let Some(d) = &c.dominant {
+            *concept_ms.entry(d.clone()).or_default() += c.clip.out_ms - c.clip.in_ms;
+        }
+        used.insert((c.clip.media_id, c.clip.scene_index));
+    };
+    let mut concept_ms: HashMap<String, i64> = HashMap::new();
+
+    // Coverage first (journey recap): the best clean window of every concept with enough footage, then of every
+    // slice of recording time that has none yet, so no part of the trip is left out by stronger repeated scenes.
+    if journey {
+        let clean = |c: &&Candidate| !c.clip.reasons.iter().any(|r| r.starts_with('⚠'));
+        let mut footage: HashMap<&str, i64> = HashMap::new();
+        for c in &pool {
+            *footage.entry(c.dominant.as_deref().unwrap_or("")).or_default() += c.clip.out_ms - c.clip.in_ms;
+        }
+        let mut concepts: Vec<&str> = footage.iter().filter(|(k, ms)| !k.is_empty() && **ms >= COVER_CONCEPT_MS).map(|(k, _)| *k).collect();
+        concepts.sort();
+        let at = |c: &Candidate| crate::export::unix_ms(&c.order.0).map(|t| t + c.clip.in_ms);
+        let t0 = pool.iter().filter_map(at).min().unwrap_or(0);
+        let mut slices: Vec<i64> = pool.iter().filter_map(at).map(|t| (t - t0) / COVER_SLICE_MS).collect();
+        slices.sort();
+        slices.dedup();
+        let (mut by_concept, mut by_time) = (0, 0);
+        for key in concepts.iter().map(|k| Ok(*k)).chain(slices.iter().map(|s| Err(*s))) {
+            let covered = chosen.iter().any(|c| match key {
+                Ok(k) => c.dominant.as_deref() == Some(k),
+                Err(s) => at(c).is_some_and(|t| (t - t0) / COVER_SLICE_MS == s),
+            });
+            if covered {
+                continue;
+            }
+            let best = pool
+                .iter()
+                .filter(clean)
+                .filter(|c| match key {
+                    Ok(k) => c.dominant.as_deref() == Some(k),
+                    Err(s) => at(c).is_some_and(|t| (t - t0) / COVER_SLICE_MS == s),
+                })
+                .filter(|c| eligible(c, &chosen, &used) && total + c.clip.out_ms - c.clip.in_ms <= st.target_ms)
+                .max_by(|a, b| a.clip.rank.total_cmp(&b.clip.rank).then(b.order.cmp(&a.order)));
+            if let Some(c) = best {
+                take(c, &mut total, &mut concept_ms, &mut used);
+                chosen.push(c);
+                if key.is_ok() { by_concept += 1 } else { by_time += 1 }
+            }
+        }
+        if by_concept + by_time > 0 {
+            notes.push(format!("coverage: {by_concept} clips so every scene type appears, {by_time} so every part of the trip appears"));
+        }
+    }
+
     while total + st.clip_min_ms <= st.target_ms {
         let best = pool
             .iter()
-            .filter(|c| !chosen.iter().any(|x| x.clip.media_id == c.clip.media_id && overlap(x.clip.in_ms, x.clip.out_ms, c.clip.in_ms, c.clip.out_ms) > 0))
-            .filter(|c| !c.duplicates.iter().any(|d| used.contains(d)))
-            .filter(|c| new_content(c, &chosen))
+            .filter(|c| eligible(c, &chosen, &used))
             .map(|c| {
                 let len = c.clip.out_ms - c.clip.in_ms;
                 let within = c.dominant.as_deref().is_none_or(|d| concept_ms.get(d).copied().unwrap_or(0) + len <= share_ms);
@@ -539,11 +690,7 @@ pub fn plan_with(st: &Style, sources: &[Source], wishes: &Wishes) -> Plan {
             // ties: farthest from the clips already taken from that file (even coverage), then time order.
             .max_by(|(a, wa, ra, da), (b, wb, rb, db)| wa.cmp(wb).then(ra.total_cmp(rb)).then(da.cmp(db)).then(b.order.cmp(&a.order)));
         let Some((c, _, _, _)) = best else { break };
-        total += c.clip.out_ms - c.clip.in_ms;
-        if let Some(d) = c.dominant.as_deref() {
-            *concept_ms.entry(d).or_default() += c.clip.out_ms - c.clip.in_ms;
-        }
-        used.insert((c.clip.media_id, c.clip.scene_index));
+        take(c, &mut total, &mut concept_ms, &mut used);
         chosen.push(c);
     }
 
@@ -574,20 +721,31 @@ pub fn plan_with(st: &Style, sources: &[Source], wishes: &Wishes) -> Plan {
     }
 
     let clips = merge_near(chosen.into_iter().map(|c| c.clip.clone()).collect());
-    let n = clips.len() as i64;
     let suggested_title = suggest_title(&clips, sources);
     Plan {
         style: st.id.into(),
         wishes: wishes.clone(),
         target_ms: st.target_ms,
-        total_ms: clips.iter().map(|c| c.out_ms - c.in_ms).sum::<i64>() - (n - 1).max(0) * st.transition_ms,
+        total_ms: output_ms(&clips, sources, st),
         transition_ms: st.transition_ms,
         export_preset: wishes.preset.clone().unwrap_or_else(|| st.export_preset.into()),
         clips,
         skipped,
         candidates,
         suggested_title,
+        notes,
     }
+}
+
+fn clock(ms: i64) -> String {
+    format!("{}:{:02}", ms / 60_000, ms / 1000 % 60)
+}
+
+/// Length of the exported video: clip lengths minus the style's transitions, with the same rules as export.
+fn output_ms(clips: &[PlanClip], sources: &[Source], st: &Style) -> i64 {
+    let recorded: HashMap<i64, Option<&str>> = sources.iter().map(|s| (s.media.id, s.media.probe.source_created_at.as_deref())).collect();
+    let joins: Vec<crate::export::JoinClip> = clips.iter().map(|c| (c.media_id, recorded.get(&c.media_id).copied().flatten(), c.in_ms, c.out_ms)).collect();
+    clips.iter().map(|c| c.out_ms - c.in_ms).sum::<i64>() - crate::export::joins(st.transition, st.transition_ms, &joins).iter().map(|j| j.1).sum::<i64>()
 }
 
 /// "Xe đạp · 20/02/2026" or "Biển · 02/2026 – 05/2026": most frequent main concept + date range.
@@ -649,8 +807,21 @@ pub fn styled_options(mut o: crate::export::Options, st: &Style, p: &Plan) -> cr
     if w.music.as_deref() == Some("none") {
         o.music = None;
     }
+    // Measured on the owner's DJI footage (2026-11-08): the clips' own sound averages about −25 dBFS, above the
+    // ducking threshold (≈ −34 dBFS), so at full level the music stays ~8 dB down for the whole video under
+    // road and wind noise. With music and no subtitles the clips' sound becomes a quiet natural bed; louder
+    // moments (voices) still duck the music.
+    let music = o.music.is_some() || w.music.as_deref().is_some_and(|m| m != "none");
+    if music && !o.titles.captions {
+        o.original_volume = o.original_volume.min(AMBIENCE_VOLUME);
+    } else if o.original_volume == AMBIENCE_VOLUME {
+        o.original_volume = 1.0; // the level this function set for earlier music: back to full without it
+    }
     o
 }
+
+/// Level of the clips' own sound under music (−9 dB). Initial value from one library, tune by ear.
+const AMBIENCE_VOLUME: f64 = 0.35;
 
 // ------------------------------------------------------------------ storage
 
@@ -719,7 +890,8 @@ mod tests {
         MediaTags {
             device: "CPU".into(),
             tags: [("sea", "biển"), ("people", "con người"), ("bicycle", "xe đạp")].iter().map(|(e, v)| TagName { en: (*e).into(), vi: (*v).into(), negative: false }).collect(),
-            samples: per_2s.iter().enumerate().map(|(i, &k)| TagSample { at_ms: i as i64 * 2000, tags: vec![(k, probs)] }).collect(),
+            cues: vec![],
+            samples: per_2s.iter().enumerate().map(|(i, &k)| TagSample { at_ms: i as i64 * 2000, tags: vec![(k, probs)], cues: vec![] }).collect(),
         }
     }
 
@@ -777,6 +949,18 @@ mod tests {
     }
 
     #[test]
+    fn journey_recap_keeps_trip_order_and_longer_clips() {
+        let st = style("journey_recap").unwrap();
+        let mut sources: Vec<Source> = (1..=8).map(|i| src(media(i, "2026-02-20", 60_000), vec![scene(i, 0, 0, 60_000, 0.8)])).collect();
+        sources[4].tags = Some(tags(&[0; 30], 0.9)); // a sea view in the middle of the trip is not moved to the front
+        let p = plan(&st, &sources);
+        assert_eq!(p.clips[0].media_id, 1, "starts where the trip starts");
+        assert!(p.clips.windows(2).all(|w| (w[0].media_id, w[0].in_ms) < (w[1].media_id, w[1].in_ms)), "trip order");
+        assert!(p.clips.iter().all(|c| c.out_ms - c.in_ms >= st.clip_min_ms), "no short, choppy clips");
+        assert!(p.clips.iter().map(|c| c.media_id).collect::<HashSet<_>>().len() == 8, "every part of the trip appears");
+    }
+
+    #[test]
     fn long_single_shot_is_sampled_spread_out() {
         let st = style("clean_minimal").unwrap(); // 60 s from one 300 s continuous shot
         let p = plan(&st, &[src(media(1, "2026-02-20", 300_000), vec![scene(1, 0, 0, 300_000, 0.8)])]);
@@ -797,6 +981,74 @@ mod tests {
         assert_eq!(fit_speech(18_000, 22_000, &speech, (0, 60_000), &st), None, "shrinking would go below the minimum");
         assert_eq!(fit_speech(12_000, 25_000, &speech, (0, 60_000), &st), Some((12_000, 20_000)), "shrunk to exclude the long talk");
         assert_eq!(fit_speech(4_000, 8_000, &speech, (4_000, 60_000), &st), None, "sentence starts before the scene and cannot be excluded");
+    }
+
+    #[test]
+    fn forest_trails_and_bridges_kept_though_handlebars_fill_the_frame() {
+        let st = style("journey_recap").unwrap();
+        // File 1: 120 s ride, handlebars always in frame (view 0.01). 0–60 s forest trail with a bridge at 40–60 s,
+        // 60–120 s paved open road. File 2: 120 s of sea, camera raised.
+        let mut ride = tags(&[2; 60], 0.9);
+        ride.cues = [("view ahead", "thấy đường phía trước"), ("forest trail", "đường mòn trong rừng"), ("small bridge", "qua cầu nhỏ")]
+            .iter().map(|(e, v)| TagName { en: (*e).into(), vi: (*v).into(), negative: false }).collect();
+        for s in ride.samples.iter_mut() {
+            let t = s.at_ms;
+            s.cues = vec![0.01, if t < 60_000 { 0.98 } else { 0.1 }, if (40_000..60_000).contains(&t) { 0.8 } else { 0.05 }];
+        }
+        let mut a = src(media(1, "2026-02-20", 120_000), vec![scene(1, 0, 0, 120_000, 0.8)]);
+        a.tags = Some(ride);
+        let mut sea = tags(&[0; 60], 0.9);
+        sea.cues = vec![TagName { en: "view ahead".into(), vi: "thấy đường phía trước".into(), negative: false }];
+        sea.samples.iter_mut().for_each(|s| s.cues = vec![0.9]);
+        let mut b = src(media(2, "2026-02-20", 120_000), vec![scene(2, 0, 0, 120_000, 0.9)]);
+        b.tags = Some(sea);
+        let p = plan(&st, &[a, b]);
+        let ride: Vec<_> = p.clips.iter().filter(|c| c.media_id == 1).collect();
+        assert!(!ride.is_empty() && ride.iter().all(|c| c.out_ms <= 60_000), "trail kept, paved handlebar shots left out: {:?}", ride.iter().map(|c| (c.in_ms, c.out_ms)).collect::<Vec<_>>());
+        assert!(ride.iter().any(|c| c.tags[0] == "qua cầu nhỏ"), "the bridge is its own scene: {:?}", ride.iter().map(|c| &c.tags).collect::<Vec<_>>());
+        assert!(ride.iter().any(|c| c.tags[0] == "đường mòn trong rừng"), "coverage: the forest trail appears too");
+        assert_eq!(p.target_ms, RECAP_MIN_MS, "4 min of footage → shortest auto length");
+        assert!(p.notes.iter().any(|n| n.starts_with("length 1:30 chosen from 4 min")), "{:?}", p.notes);
+        assert!(p.skipped.iter().any(|s| s.contains("camera pointing down")));
+        let fixed = plan_with(&st, &[], &Wishes { target_ms: Some(200_000), ..Default::default() });
+        assert!(fixed.target_ms == 200_000 && fixed.notes.is_empty(), "a length the user asked for wins");
+    }
+
+    #[test]
+    fn raised_camera_beats_camera_pointing_down() {
+        let st = style("social_story").unwrap(); // hook = strongest clean clip
+        // One 24 s cycling shot: first 12 s camera tilted down, last 12 s raised (road and landscape ahead).
+        let mut t = tags(&[2; 12], 0.9);
+        t.cues = vec![TagName { en: "view ahead".into(), vi: "thấy đường phía trước".into(), negative: false }];
+        for s in t.samples.iter_mut() {
+            s.cues = vec![if s.at_ms < 12_000 { 0.01 } else { 0.95 }];
+        }
+        let shot = || Source { tags: Some(t.clone()), ..src(media(1, "2026-02-20", 24_000), vec![scene(1, 0, 0, 24_000, 0.9)]) };
+        let p = plan_with(&st, &[shot()], &Wishes { target_ms: Some(4_000), ..Default::default() });
+        assert!(p.clips.iter().all(|c| c.in_ms >= 12_000), "raised camera first: {:?}", p.clips.iter().map(|c| c.in_ms).collect::<Vec<_>>());
+        let full = plan_with(&st, &[shot()], &Wishes { target_ms: Some(30_000), ..Default::default() });
+        assert!(full.clips.iter().all(|c| c.in_ms >= 12_000), "tilted-down windows never fill the target");
+        assert!(full.skipped.iter().any(|s| s.contains("camera pointing down")), "{:?}", full.skipped);
+        assert!(p.clips[0].reasons.iter().any(|r| r.starts_with("thấy đường phía trước")));
+        let mut old = src(media(2, "2026-02-20", 4_000), vec![scene(2, 0, 0, 4_000, 0.9)]);
+        old.tags = Some(tags(&[2, 2], 0.9)); // tagged with a model without cues
+        let o = plan(&st, &[old]);
+        assert!(o.clips.iter().all(|c| !c.reasons.iter().any(|r| r.contains("máy cúi") || r.contains("phía trước"))), "older tags: no effect");
+        assert!((view_factor(0.0) - 0.6).abs() < 1e-9 && (view_factor(1.0) - 1.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stretched_whisper_lines_do_not_stretch_clips() {
+        let st = style("journey_recap").unwrap();
+        let mut a = src(media(1, "2026-02-20", 60_000), vec![scene(1, 0, 0, 60_000, 0.8)]);
+        let line = |s: i64, e: i64, text: &str| Segment { start_ms: s, end_ms: e, text: text.into() };
+        // Real line from the owner's footage: 4 syllables timed over 22 s of road noise; and one normal line.
+        a.transcript = Some(Transcript { media_id: 1, model_id: "w".into(), language: Some("vi".into()),
+            segments: vec![line(3_000, 25_000, "Tính ra lẹ chứ"), line(40_000, 42_000, "Đi tiếp không chị?")], created_at: String::new() });
+        let p = plan(&st, &[a]);
+        assert!(p.clips.iter().all(|c| c.out_ms - c.in_ms <= st.clip_max_ms * 3 && (c.in_ms >= 25_000 || c.scores.speech == 0.0)),
+            "stretched line ignored: {:?}", p.clips.iter().map(|c| (c.in_ms, c.out_ms, c.scores.speech)).collect::<Vec<_>>());
+        assert!(p.clips.iter().all(|c| c.out_ms <= 40_000 || c.in_ms >= 42_000 || (c.in_ms <= 40_000 && c.out_ms >= 42_000)), "real line kept whole");
     }
 
     #[test]
@@ -927,6 +1179,16 @@ mod tests {
         assert!(o.music.is_none(), "\"no music\" removes the music");
         let o = styled_options(crate::export::Options::default(), &st, &plan(&st, &[]));
         assert_eq!((o.fill, o.color.as_str(), o.titles.captions), (false, "cinematic", false), "no wishes: the style decides");
+        assert_eq!(o.original_volume, 1.0, "no music: the clips' sound stays at full level");
+        let music = plan_with(&st, &[], &Wishes { music: Some("low".into()), ..Default::default() });
+        let bed = styled_options(crate::export::Options::default(), &st, &music);
+        assert_eq!(bed.original_volume, AMBIENCE_VOLUME, "under music: a quiet bed");
+        let silent = plan_with(&st, &[], &Wishes { music: Some("none".into()), ..Default::default() });
+        assert_eq!(styled_options(bed, &st, &silent).original_volume, 1.0, "music removed: own sound back to full");
+        let own = crate::export::Options { original_volume: 0.7, ..Default::default() };
+        assert_eq!(styled_options(own, &st, &silent).original_volume, 0.7, "a level the user chose is kept");
+        let talk = style("travel_documentary").unwrap(); // subtitles on: speech matters, level kept
+        assert_eq!(styled_options(crate::export::Options::default(), &talk, &plan_with(&talk, &[], &music.wishes)).original_volume, 1.0);
     }
 
     #[test]

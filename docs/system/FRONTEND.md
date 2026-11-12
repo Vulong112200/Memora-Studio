@@ -1,12 +1,12 @@
 # Memora Studio — Frontend
 
-The React webview of the Tauri app: one scrolling page of cards that call Rust commands through typed wrappers and follow background jobs through `job-updated` events.
+The React webview of the Tauri app: a sidebar with five pages (Library, Projects, Photos, Jobs, Settings), a "Next step" banner and a job bar; cards call Rust commands through typed wrappers and follow background jobs through `job-updated` events. Bilingual (Vietnamese default, English).
 
-Last verified: 2026-11-08 against commit `b751673`.
+Last verified: 2026-11-11 against commit `9ac182c` + uncommitted changes.
 
 Index of all system docs: [README.md](README.md). The `sync-docs` skill (`.claude/skills/sync-docs/`) keeps this file current; run it after any change under `apps/desktop/` outside `src-tauri/`.
 
-Sources: [apps/desktop/src/](../../apps/desktop/src/) — [main.tsx](../../apps/desktop/src/main.tsx), [App.tsx](../../apps/desktop/src/App.tsx), [api.ts](../../apps/desktop/src/api.ts), [Projects.tsx](../../apps/desktop/src/Projects.tsx), [EditingPlan.tsx](../../apps/desktop/src/EditingPlan.tsx), [Timeline.tsx](../../apps/desktop/src/Timeline.tsx), [MediaLibrary.tsx](../../apps/desktop/src/MediaLibrary.tsx), [AiCenter.tsx](../../apps/desktop/src/AiCenter.tsx), [Models.tsx](../../apps/desktop/src/Models.tsx), [index.css](../../apps/desktop/src/index.css). Backend counterpart: [BACKEND.md](BACKEND.md).
+Sources: [apps/desktop/src/](../../apps/desktop/src/) — [main.tsx](../../apps/desktop/src/main.tsx), [App.tsx](../../apps/desktop/src/App.tsx), [api.ts](../../apps/desktop/src/api.ts), [Projects.tsx](../../apps/desktop/src/Projects.tsx), [EditingPlan.tsx](../../apps/desktop/src/EditingPlan.tsx), [Timeline.tsx](../../apps/desktop/src/Timeline.tsx), [MediaLibrary.tsx](../../apps/desktop/src/MediaLibrary.tsx), [PhotoEditor.tsx](../../apps/desktop/src/PhotoEditor.tsx), [AiCenter.tsx](../../apps/desktop/src/AiCenter.tsx), [Models.tsx](../../apps/desktop/src/Models.tsx), [ui.tsx](../../apps/desktop/src/ui.tsx), [i18n.ts](../../apps/desktop/src/i18n.ts), [index.css](../../apps/desktop/src/index.css). Backend counterpart: [BACKEND.md](BACKEND.md).
 
 ---
 
@@ -64,7 +64,7 @@ No router, no state library, no component library, no icon package, no data-fetc
 
 ### Webview security that affects the UI ([tauri.conf.json](../../apps/desktop/src-tauri/tauri.conf.json))
 
-- CSP: `img-src 'self' data: asset: http://asset.localhost`; `media-src 'self' asset: http://asset.localhost https://incompetech.com`; `style-src 'self' 'unsafe-inline'`. Images/videos load only from the asset protocol (plus music previews from incompetech.com).
+- CSP: `img-src 'self' data: asset: http://asset.localhost`; `media-src 'self' asset: http://asset.localhost https://incompetech.com https://www.scottbuckley.com.au`; `style-src 'self' 'unsafe-inline'`. Images/videos load only from the asset protocol (plus music previews from incompetech.com and scottbuckley.com.au).
 - Asset protocol scope is empty in config; Rust adds `<data root>\cache` at runtime, so `convertFileSrc` works only for thumbs, proxies and scene frames.
 - Window: 1200×800, min 900×600.
 
@@ -72,36 +72,49 @@ No router, no state library, no component library, no icon package, no data-fetc
 
 ## Page layout
 
-Single page, no router. [App.tsx](../../apps/desktop/src/App.tsx) renders `<main>` (full-height, `p-6`) with a header ("Memora Studio" + **Refresh** link) and a grid `max-w-5xl gap-4 lg:grid-cols-2`. Every card except the two hardware cards spans both columns (`lg:col-span-2`).
+No router: [App.tsx](../../apps/desktop/src/App.tsx) keeps `page: "library" | "project" | "photos" | "jobs" | "settings"` in state (remembered in `localStorage` `memora.page`). Layout: full-height column = left `nav` (w-52: "Memora Studio", five page buttons with Unicode icons, the open project, language switch Tiếng Việt / English) + scrolling `main` (`max-w-6xl`) + `JobBar` at the bottom. Without a data root (or with a DB error) only Settings is enabled and shown.
 
-| # | Card | Render condition | `key` | Props |
-|---|---|---|---|---|
-| 1 | `DataFolder` (in App.tsx) | `settings` loaded | — | `settings`, `onSaved` (sets settings, then `refresh()`) |
-| 2 | `Projects` | `settings.dataRoot && !settings.databaseError` | `settings.dataRoot` | `active={project}`, `onOpen={setProject}` |
-| 3 | `EditingPlan` ("Smart edit") | same + `project` open | `` `${dataRoot}-${project.id}` `` | `project`, `onApplied` → bump `timelineVersion` |
-| 4 | `Timeline` | same + `project` open | `` `${dataRoot}-${project.id}` `` | `project`, `version={timelineVersion}` |
-| 5 | `MediaLibrary` | data root + no DB error | `settings.dataRoot` | `project` (may be null), `onClipAdded` → bump `timelineVersion` |
-| 6 | `AiCenter` | always | — | none |
-| 7 | `Models` ("AI models") | data root + no DB error | `settings.dataRoot` | none |
-| 8 | `Hardware` → two cards "System" and "Graphics" (one column each on `lg`) | `hw` loaded, else "Detecting hardware…" | — | `hw` |
+| Page | Content | Render condition / `key` |
+|---|---|---|
+| Library | `NextStep`, `MediaLibrary` (`project`, `version`, `onClipAdded` → bump, `onSettings` → Settings page) | data root + DB; key `settings.dataRoot` |
+| Projects | `NextStep`, `ProjectPage`: `Projects` card, then for the open project a 3-step bar (1 Videos → goes to Library, 2 Smart edit, 3 Edit & export) and `EditingPlan` (step 2, `onApplied` → bump + step 3) or `Timeline` (step 3, `version`) | data root + DB; key `settings.dataRoot`, steps keyed on `project.id` |
+| Photos | `PhotoEditor` (no Next-step banner) | data root + DB; key `settings.dataRoot` |
+| Jobs | `AiCenter` (all jobs of the session + worker + device check) | always |
+| Settings | `DataFolder` (+ `Backup`), `Models`, `Hardware` (System, Graphics) | always (`Models` needs the DB) |
 
-- **Remount keys**: changing the data root switches database, so every DB-backed card is keyed on `settings.dataRoot` and loses its local state. Switching project remounts `EditingPlan` and `Timeline` (key includes `project.id`).
-- **Cross-card refresh**: App holds `timelineVersion` (number). `EditingPlan.onApplied` and `MediaLibrary.onClipAdded` increment it; `Timeline` re-runs `load()` and `getExportOptions()` when `version` changes. Nothing else is shared; e.g. Smart edit does not see library changes until it remounts or regenerates (it refreshes its media map after each Generate).
-- **Open project**: lives only in App state (`project: Project | null`), not persisted; it is lost on restart or data-root change. `Projects` keeps it in sync after rename/delete (calls `onOpen(now)` / `onOpen(null)`).
-- **App state**: `settings`, `hw`, `error`, `project`, `timelineVersion` in `App`; everything else is local `useState` per card. No context, no store.
-- `refresh()` (on mount, header **Refresh**, after saving the data root) calls `getSettings()` and `getHardwareInfo()`; errors go to one red line under the header.
+- **Open project**: `project` in App state, its id remembered in `localStorage` `memora.project` and reopened at start (`listProjects`). `Projects` keeps it in sync after rename/delete.
+- **Refresh**: App holds `version` (number); it is bumped by every job that leaves queued/running (`onJobUpdated`), by `MediaLibrary.onClipAdded` and `EditingPlan.onApplied`. `NextStep`, `MediaLibrary` and `Timeline` reload when it changes. No context, no store.
+- `refresh()` (mount, after saving the data root) calls `getSettings()` and `getHardwareInfo()`; errors go to one red line at the top of `main`.
 
 ### App.tsx (components inside)
 
 | Component | Purpose |
 |---|---|
-| `Card({title, children})` | Shared card shell: `rounded-xl border … bg-white p-5 dark:…` + uppercase `h2`. Used only inside App.tsx; other files repeat the same classes inline. |
 | `Row({label, value, warn})` | Label/value line; `warn` → `font-medium text-amber-600`. |
-| `DataFolder` | Data-root input. First run (no `dataRoot`): explanation paragraph, button "Use this folder"; later "Change". Disabled while saving, when empty, or unchanged. `setDataRoot(path)` → `onSaved`. Shows Current / Log folder ("not active (console only)" when `logDir` null), `databaseError` (red), `restartRequired` → amber "Restart Memora Studio to write logs to the new folder." Renders `Backup` when a data root is set and the DB opened. |
-| `Backup` | "Back up now" → `backupDatabase()`; green "Saved <path>" or red error. Static text: auto backup at start, last 10 kept in `database\backups`, restore instructions (copy over `database\memora.db`, delete `-wal`/`-shm`). |
-| `Hardware({hw})` | "System": Windows name/edition/version/build, CPU + logical processors, memory free/total/load, commit free/limit (amber when `commitAvailable < LOW_COMMIT_BYTES`), data drive free/total. "Graphics": per GPU dedicated / shared ("part of system RAM") / driver; "No hardware GPU detected…" when empty; note that AI devices are validated by the worker. |
+| `DataFolder` | Data-root input. First run (no `dataRoot`): explanation, button "Use this folder"; later "Change". `setDataRoot(path)` → `onSaved`. Shows Current / Log folder, `databaseError` (red), `restartRequired` (amber). Renders `Backup` when the DB opened. |
+| `Backup` | "Back up now" → `backupDatabase()`; green "Saved <path>" or red error; text about the automatic backups and the manual restore steps. |
+| `Hardware({hw})` | "System" (Windows, CPU, memory, commit — amber below `LOW_COMMIT_BYTES` —, data drive) and "Graphics" (per GPU dedicated / shared memory, driver; AI devices are validated by the worker). |
+| `NextStep({project, version, go})` | Indigo banner "Next step" computed from `listMedia`, `listModels`, `listClips(project)`, `getPlan(project)`: no videos → open Library; a job running → wait; missing analysis steps (`ui::preparation`) → **Analyse now** (`ui::prepareMedia`); no project → open Projects; no clips → Smart edit (step 2); else → Edit & export (step 3). Link "Install AI models for better choices" when a model is missing. Not shown on Jobs / Settings. |
+| `ProjectPage` | `Projects` (folded in a native `<details>` "Project: … · change, create, rename…" while a project is open) + step bar + step 2 / 3 content (see table above). |
 
-Constant: `LOW_COMMIT_BYTES = 8 * 1024 ** 3` (8 GiB; Production.md §9.2 small pagefile).
+Constants: `LOW_COMMIT_BYTES = 8 * 1024 ** 3` (8 GiB; Production.md §9.2 small pagefile). Helpers `remember(key, value)` / `recall(key)` wrap `localStorage` in try/catch.
+
+### ui.tsx (shared pieces)
+
+| Export | Purpose |
+|---|---|
+| `btn.primary` / `btn.secondary` / `btn.link`, `field` | Class strings (indigo primary button, bordered secondary, small link-button, input/select). |
+| `Card({title, actions?, children})` | Card shell (`rounded-2xl … shadow-sm`), uppercase title, optional right-aligned actions. |
+| `fileName(path)`, `Thumb({path, className?})`, `Progress({value 0..1})` | File name from a path; cache thumbnail via `convertFileSrc` or grey placeholder; indigo progress bar. |
+| `active(job)`, `jobLabel(kind)` | Queued/running test; bilingual label per job kind. |
+| `useJobs()` | `listJobs()` + upsert on every `job-updated`. |
+| `JobBar({onOpen})` | Bottom bar while jobs are queued/running: first job label, % and bar, "+N waiting" (→ Jobs page), **Cancel**. Hidden when idle. |
+| `preparation(media, models)` | Ids still to analyse (`sceneCount === null`), tag (`tags === null`, only when `openclip-vit-b32` is ready) and transcribe (audio, not transcribed, only when `whisper-small` — else `whisper-base` — is ready); `missingModels`. |
+| `prepareMedia(media, models)` | Submits, in this order, `media.analyze {ids, quality: "balanced"}`, `media.tag {ids}`, `media.transcribe {ids, model, language: "auto"}` for what `preparation` lists (the FIFO queue runs them one after the other, so tagging finds the proxies). Returns the number of steps. |
+
+### i18n.ts
+
+`lang` = `localStorage` `memora.lang` (`"en"` → English, anything else → Vietnamese, also when storage is blocked); sets `document.documentElement.lang`. `L(en, vi)` returns the string of the current language — every UI string is written in both languages where it is used (no key table). `dateTime(d)` formats dates in the UI language (`vi-VN` / `en-GB`, short date + time). `setLang(l)` stores and reloads the window (module-level lists such as `PRESETS` are built at import). Backend texts (style names and descriptions, plan reasons, errors, validation checks) stay as Rust sends them.
 
 ---
 
@@ -146,6 +159,13 @@ Constant: `LOW_COMMIT_BYTES = 8 * 1024 ** 3` (8 GiB; Production.md §9.2 small p
 | `listJobs()` | `list_jobs` | — | `Job[]` (in-memory, this session) |
 | `cancelJob(id)` | `cancel_job` | `{ id }` | `void` |
 | `getWorkerInfo()` | `get_worker_info` | — | `WorkerInfo \| null` (null = worker not running) |
+| `listPhotos()` | `list_photos` | — | `Photo[]` |
+| `importPhotos(paths)` | `import_photos` | `{ paths }` | `PhotoImport { ids, failed[] }` |
+| `setPhotoEdits(id, edits)` | `set_photo_edits` | `{ id, edits }` (`PhotoEdits` or `null`) | `void` |
+| `previewPhoto(id, edits, showMask, before)` | `preview_photo` | `{ id, edits, showMask, before }` | `string` (cache file of a ≤ 1600 px preview) |
+| `autoPhoto(id)` | `auto_photo` | `{ id }` | `PhotoEdits` (suggested values) |
+| `exportPhoto(id)` | `export_photo` | `{ id }` | `string` (exported file) |
+| `removePhoto(id)` | `remove_photo` | `{ id }` | `void` |
 
 `submit_job` accepts only `UI_JOB_KINDS` in lib.rs: `validate_devices`, `media.import`, `media.proxy`, `media.export`, `media.analyze`, `media.transcribe`, `media.tag`, `models.install`. Kinds and params the UI actually submits:
 
@@ -153,10 +173,10 @@ Constant: `LOW_COMMIT_BYTES = 8 * 1024 ** 3` (8 GiB; Production.md §9.2 small p
 |---|---|---|
 | `validate_devices` | AiCenter | none |
 | `media.import` | MediaLibrary | `{ paths: string[] }` |
-| `media.analyze` | MediaLibrary (auto after import, button) | `{ ids, quality: "balanced" }` |
-| `media.tag` | MediaLibrary | `{ ids }` |
-| `media.transcribe` | MediaLibrary | `{ ids, model: "whisper-base" \| "whisper-small", language: "auto" }` |
-| `media.export` | Timeline, EditingPlan ("Apply and export") | `{ projectId, preset, options: ExportOptions }` |
+| `media.analyze` | `ui::prepareMedia` (after import, Library **Analyse**, Next step **Analyse now**) | `{ ids, quality: "balanced" }` |
+| `media.tag` | `ui::prepareMedia` (OpenCLIP ready) | `{ ids }` |
+| `media.transcribe` | `ui::prepareMedia` (a Whisper model ready; small preferred) | `{ ids, model: "whisper-base" \| "whisper-small", language: "auto" }` |
+| `media.export` | Timeline, EditingPlan ("Use and export now") | `{ projectId, preset, options: ExportOptions }` |
 | `models.install` | Models | `{ id, files?: Record<artifactFile, absolutePath> }` (no `files` = download) |
 | `media.proxy` | never by the UI (analysis creates missing proxies) | — |
 
@@ -192,7 +212,7 @@ useEffect(() => {
 | `PlanClip` | `editing::PlanClip` | `mediaId, sceneIndex, inMs, outMs, scores{technical,semantic,speech,favorite}, rank, tags[], reasons[]` |
 | `Wishes` | `editing::Wishes` | `prefer[], less[], avoid[]` (tag `en` names), `targetMs, preset, color, title, ending, captions, music` (all nullable), `request` (raw text) |
 | `RequestReading` | `request::Request` | `style, from, to` (nullable), `wishes`, `understood[]` (human-readable chips) |
-| `Plan` | `editing::Plan` | `style, wishes, targetMs, totalMs, transitionMs, exportPreset, clips[], skipped[]` (why files were not used), `candidates, suggestedTitle` |
+| `Plan` | `editing::Plan` | `style, wishes, targetMs, totalMs, transitionMs, exportPreset, clips[], skipped[]` (why files were not used), `candidates, suggestedTitle`, `notes?` (how the plan was built) |
 | `ExportOptions` | `export::Options` | `fill, transitionMs, transition, color, fade, originalVolume, music{path, library \| null, volume, duck} \| null, titles{title,subtitle,ending,captions}, normalize` |
 | `Track` | `sounds::Track` (sounds.json) | `id, title, artist, moods[], energy, durationMs, url, license, credit` (Rust also has `sha256, sizeBytes, licenseUrl`) |
 | `SoundRecommendation` | `sounds::Recommendation` | `id, score, reasons[]` |
@@ -202,6 +222,8 @@ useEffect(() => {
 | `ExportPreset` | `export::Preset` | `"landscape" \| "story" \| "reels" \| "archive"` |
 | `ExportResult` | `media.export` job result JSON | `path, preset, encoder, renderSeconds, durationMs, width, height, validation{ok, checks[]{name,ok,detail}, warnings[]}` (Rust also sends `transitionMs, options, music, loudness`) |
 | `ModelInfo` | `models::ModelView` (+ flattened `Manifest`) | `id, name, version, category, description, license, minimumRamGb, artifacts[]{file,url,sha256,sizeBytes}, runtimes[]{runtime,devices,validated}, notes, state, error, path, details{devices?[]}, downloadBlocker` |
+| `Photo` | `photos::Photo` | `id, path, size, width, height, takenAt, edits: PhotoEdits \| null, importedAt, thumb` |
+| `PhotoEdits` | photo.py edit stack | numbers −100..100 by key, plus `look`, `crop`, `rotate`, `hsl: {band: [hue, sat, light]}` |
 | `ScoredScene` | `scoring::ScoredScene` (+ flattened `Scene`) | `id, mediaId, index, startMs, endMs, shake, framePath, samples[]`, `technical{sharpness,exposure,brightness,contrast,stability,total}` (0–1), `flags[], duplicates[], tags[]` |
 
 Local result types (not in api.ts): `ImportResult { imported, ids, failed[]{path,error} }` and `BatchResult { failed[]{id,error} }` in MediaLibrary.tsx.
@@ -212,106 +234,82 @@ Local result types (not in api.ts): `ImportResult { imported, ids, failed[]{path
 
 ### Projects.tsx
 
-- **Purpose**: list, create, rename, delete, open projects.
+- **Purpose**: list, create, rename, delete, open projects (`Card` "Projects / Dự án").
 - **Props**: `active: Project | null`, `onOpen(p: Project | null)`.
 - **State**: `projects: Project[] | null`, `name` (new-project input), `error`. `ProjectRow`: `editing`, `name`, `confirming`.
-- **Sub-components**: `ProjectRow({project, active, onOpen, onChanged, onError})`.
+- **Sub-components**: `ProjectRow({project, active, onOpen, onChanged, onError})` (active row highlighted indigo with "open").
 - **Commands**: `listProjects`, `createProject`, `renameProject`, `deleteProject`.
 - **Events**: none.
-- **Actions**:
-  - **Create** (form submit; disabled when name blank) → `createProject(name)`, clear input, reload.
-  - **Open** (hidden on the active row) → `onOpen(p)`; active row shows green "open".
-  - **Rename** → inline input (autofocus; Escape cancels) → **Save** `renameProject` then reload / **Cancel** restores name.
-  - **Delete** → confirm text "Delete project? Original videos are not affected." → red **Delete** `deleteProject` / **Keep**.
-  - Effect: after every reload, if the active project is gone → `onOpen(null)`; if renamed → `onOpen(updated)`.
-- **Messages**: "No projects yet." when empty; errors red under the form. Rows show "Updated <locale date-time>".
-- **Constants**: `inputClass`, `linkClass`; placeholder "New project name, e.g. Đà Lạt 2026".
+- **Actions**: **Create** (form; disabled when blank) → `createProject`, reload. **Open** (secondary button, hidden on the active row) → `onOpen(p)`. **Rename** → inline input (Escape cancels) → **Save** / **Cancel**. **Delete** → inline confirm → **Delete** / **Keep**. After every reload the open project is updated or cleared.
+- **Messages**: empty list explains what a project is; errors red under the form.
 
 ### EditingPlan.tsx
 
-- **Purpose**: Smart mode (Production.md §6.4): free-text request + style + date range → generate an Editing Plan, review/reorder/drop clips, apply to the timeline (optionally export).
-- **Props**: `project: Project`, `onApplied()`.
-- **State**: `styles`, `styleId` (default `"travel_cinematic"`), `rangeId` (default `"all"`), `from`, `to` (custom dates), `plan`, `order: number[]` (indexes into `plan.clips` kept, in display order), `media: Map<id, Media>`, `message`, `busy`, `request` (text), `reading: RequestReading | null`.
-- **Sub-components**: `RequestBox({text, onChange, reading})` — textarea (2 rows) + "Understood:" chips, or amber "Nothing recognised yet. Words that work: …" when `understood` is empty.
-- **Helpers**: `range(id, from, to)` → `{}` for all; custom → given dates; `1/6/12` → `from` = today minus N months, `to` = today (both `toISOString().slice(0,10)`). `show(p)` sets plan, resets `order` to all clips, sets `styleId = p.style`.
-- **Commands**: `listStyles`, `listMedia`, `getPlan`, `interpretRequest`, `generatePlan`, `applyPlan`, `submitJob("media.export")`.
-- **Events**: none (export progress is shown by Timeline, which listens for `media.export` of this project).
-- **Lifecycle**: on mount / project change: load styles, media map, saved plan (`getPlan`); restores `request` from `plan.wishes.request`. While typing, `interpretRequest(request)` runs after a 250 ms debounce; empty text clears `reading`.
-- **Actions**:
-  - Style `<select>` (`name · N s`), date-range `<select>` (`RANGES`), two `<input type="date">` when "Custom dates…".
-  - **Generate plan / Generate again** (disabled while `busy`) → `generatePlan(project.id, styleId, from, to, request.trim() || undefined)` → `show()`, then refresh the media map.
-  - Per clip: **↑** / **↓** reorder within `order` (disabled at ends), **Drop** removes from `order`. **Restore dropped clips** resets `order` to all.
-  - **Apply to timeline** (disabled when nothing kept) → `applyPlan(project.id, order)` → `onApplied()` → message "Timeline replaced with N clips and the style's look set (<color> colour, title "<title>"). Adjust anything in Timeline › Look & sound before exporting."
-  - **Apply and export** → same, then `submitJob("media.export", { projectId, preset: plan.exportPreset, options })` with the returned options → message "…export started with the style's look (see Timeline)." Tooltip names "Reels 9:16 (centre crop)" or "Landscape 16:9".
-- **Display**: style summary line (pacing, clip min–max s, crossfade ms or "hard cuts", "vertical 9:16" when preset is reels else "16:9", opening/ending, music and titles text). Plan header: "K of N clips kept · <total> of <target> target · chosen from C candidate windows" + score legend (T technical · S visual concepts · V speech · ★ favorite). Total = sum of kept durations − (kept−1) × `plan.transitionMs`. "Made from your request: “…”" when the plan has a request. `plan.skipped[]` lines amber. Rows: number, thumbnail, file name + `clock(in)–clock(out)`, reasons (truncated, full in tooltip), `T S V` percentages + ★. List `max-h-96` scrolls.
-- **Messages**: "The style and dates named in your request replace the selection below." when `reading.style` is set; "Nothing to use: analyse videos in the Media library first (and tag / transcribe them for better choices)." when the plan has no clips; all errors and results in one grey `message` line.
-- **Constants**: `RANGES` (`all` Whole library, `1` Last month, `6` Last six months, `12` Last year, `custom` Custom dates…); `EXAMPLE` (Vietnamese sample request used in the placeholder: "Video dọc 30 giây, nhiều cảnh cây cổ thụ và đường mòn, bớt xe đạp, bỏ selfie, tông ấm, nhạc nhẹ, tiêu đề: Đà Lạt"); `WORDS` (vocabulary hint: length, dọc/ngang, nhiều/bớt/bỏ + concept, colour tones, music, phụ đề, tiêu đề:, kết thúc bằng:, month/year, mood styles); `buttonClass`; helpers `iso`, `fileName`, `pct`. Imports `clock` from Timeline.tsx.
+- **Purpose**: Smart mode (Production.md §6.4), step 2 of a project: free-text request + style + date range → Editing Plan, review / reorder / drop clips, use it (replaces the timeline), optionally export at once.
+- **Props**: `project: Project`, `onApplied()` (App bumps `version` and opens step 3).
+- **State**: `styles`, `styleId` (default `"journey_recap"`), `rangeId` (default `"all"`), `from`, `to`, `plan`, `order: number[]`, `media: Map<id, Media>`, `message` (errors), `busy`, `request`, `reading`, `replacing: {clips, thenExport} | null`.
+- **Sub-components**: `RequestBox({text, onChange, reading})` — 3-row textarea; "Understood:" chips, amber "Nothing recognised yet. Words that work: …", or the word list while empty.
+- **Helpers**: `range(id, from, to)` (custom dates, or today minus 1/6/12 months via `toISOString`); `show(p)`.
+- **Commands**: `listStyles`, `listMedia`, `getPlan`, `interpretRequest` (250 ms debounce), `generatePlan`, `listClips`, `applyPlan`, `submitJob("media.export")`.
+- **Actions**: style and date-range selects (+ two date inputs); **Make a plan / Make the plan again** ("Choosing scenes…" while busy); per clip **↑ ↓ Drop**; **Restore dropped clips**; **Use this plan →** and **Use and export now** — when the timeline already has clips, an amber inline confirm "The timeline already has N clips. Replace them with this plan?" (**Replace** / **Cancel**) comes first; then `applyPlan(project.id, order)` (+ `media.export` with the returned options and `plan.exportPreset`) and `onApplied()`.
+- **Display**: style summary (pacing, clip min–max, 16:9 / vertical, opening, ending — backend text). Plan header "K of N clips · total of target · chosen from C candidate windows" (total = `plan.totalMs` while the order is unchanged, else Σ kept − (kept−1) × `transitionMs` as an estimate), score legend, request, `plan.notes` (indigo), `plan.skipped` (amber). Rows: number, `Thumb`, first tag (else file name), file name + in–out, reasons, T/S/V + ★. List scrolls (`max-h-[28rem]`).
+- **Constants**: `RANGES`, `EXAMPLE` (Vietnamese trip-recap request), `WORDS` (bilingual vocabulary hint incl. đường rừng, qua cầu, lên dốc), `iso`, `pct`. Imports `clock` from Timeline.tsx.
 
 ### Timeline.tsx
 
-- **Purpose**: the project timeline (ordered trimmed clips), per-clip captions, Look & sound export options, export with progress and validation report.
-- **Props**: `project: Project`, `version: number` (from App `timelineVersion`).
-- **State**: `clips`, `media: Map<id, Media>`, `preset: ExportPreset` (default `"landscape"`), `options: ExportOptions | null`, `job` (latest `media.export` of this project), `error`.
-- **Exports**: `clock(ms)` → `m:ss.s` (e.g. `1:05.3`); also used by EditingPlan and MediaLibrary.
+- **Purpose**: step 3 of a project: the timeline (ordered trimmed clips), per-clip captions, Look & sound, export with progress and validation report.
+- **Props**: `project: Project`, `version: number`.
+- **State**: `clips`, `media`, `preset` (default `"landscape"`), `options`, `job` (latest `media.export` of this project), `error`.
+- **Exports**: `clock(ms)` → `m:ss.s` (also used by EditingPlan and MediaLibrary).
 - **Sub-components**:
-  - `Report({r: ExportResult})` — green/red border; "Export finished and passed validation" or "…but FAILED validation"; output path; `W×H · duration · rendered in S s (encoder)`; checks `✓`/`✗ name: detail`; warnings `! …` amber.
-  - `CaptionField({clip, onSaved, onError})` — input (max 200, placeholder "Caption (optional)"); saves with `setClipCaption` on blur only if changed.
-  - `MusicLibrary({projectId, version, current, onUse, onClose})` — free library browser: `listSounds`, `recommendSounds(projectId)` (re-run when `version` changes), "Recommended for this video" list with reasons, mood filter chips (`all` + sorted distinct moods), track rows (▶/■ preview via a hidden `<audio>` streaming `t.url`; **Use** / "Chosen"). Preview failure → "Preview needs an internet connection."; audio paused on unmount. Credit text: Kevin MacLeod (incompetech.com), CC BY 4.0, credit added at the end; chosen track downloaded only while exporting and deleted after.
-  - `LookAndSound({o, projectId, version, onChange, onError})` — three columns:
-    - Picture: Transitions select (0 Hard cuts, 300, 500, 600, 800, 1200 ms; a non-standard current value is appended as an extra option), Style select (`TRANSITIONS`, only when `transitionMs > 0`), Colour select (`COLORS`), checkboxes "Fill the frame (crop centre, no black bars)" (`fill`) and "Fade in from / out to black" (`fade`).
-    - Sound: "Clip sound N%" range 0–1.5 step 0.05 (`originalVolume`); music block: library track (`♪ title · free library`) or own file (`♪ name · your file (kept as is)`), links **Library…** / **Own file…** / **Remove**, "Music N%" range, checkbox "Lower the music while people talk" (`duck`); without music: **+ Free music library…** / **+ Your own file…**; checkbox "Even loudness (−16 LUFS, phone / social level)" (`normalize`).
-    - Text: Opening title / Subtitle / Ending text inputs (max 80), checkbox "Subtitles from speech (transcribed videos)" (`titles.captions`), hint about per-clip captions.
-    - Own file: `open({ multiple: false, filters: Audio AUDIO_EXTENSIONS })` → `music = { path, library: null, volume: prev ?? 0.35, duck: prev ?? true }`. Library pick → `music = { path: "", library: t.id, … }`.
+  - `Report({r})` — green (passed) or red (failed validation) box, output path + **copy path** (`navigator.clipboard`), size · duration · render time (encoder), checks ✓/✗, warnings.
+  - `CaptionField({clip, onSaved, onError})` — saved with `setClipCaption` on blur when changed.
+  - `MusicLibrary({projectId, version, current, onUse, onClose})` — free library: recommendations (`recommendSounds`), mood chips, ▶/■ streamed preview, **Use** / "Chosen"; licence/credit text.
+  - `LookAndSound({o, projectId, version, onChange, onError})` — Picture: transition length (0 cuts, 300, 500, 700, 800, 1200 ms; other values appended), transition style (`TRANSITIONS`, when length > 0), colour (`COLORS`), fill, fade. Sound: clip sound %, music (library / own file / remove, level, duck), even loudness. Text: opening title, subtitle, ending, speech subtitles.
 - **Commands**: `listClips`, `listMedia`, `getExportOptions`, `setExportOptions`, `moveClip`, `removeClip`, `setClipCaption`, `listSounds`, `recommendSounds`, `submitJob("media.export")`, `cancelJob`.
-- **Events**: `job-updated` filtered to `kind === "media.export" && params.projectId === project.id` (so exports started from Smart edit appear here too).
-- **Lifecycle**: `load()` (clips + media map) on mount and when `version` changes; `getExportOptions` on project/version change — if `o.fill` is true and preset is still `landscape`, preset switches to `reels`.
-- **Actions**:
-  - Export-format `<select>` (`PRESETS`) → sets preset and saves options with `fill = (preset is story or reels)`.
-  - **Export** (disabled with no clips, while exporting, or before options load) → `submitJob("media.export", { projectId, preset, options })`.
-  - Per clip: caption field, **↑** / **↓** `moveClip(id, ±1)`, **Remove** `removeClip(id)`; each reloads.
-  - Every Look & sound change → `change(o)`: optimistic `setOptions` + `setExportOptions` (error clears on success).
-  - **Cancel** during export → `cancelJob`.
-- **Display**: rows with number, thumbnail, file name, caption, `in → out`, duration. Footer "Total <clock> · rendered from the original files", where total = Σ durations − (n−1) × min(`transitionMs`, half of the shortest clip). `LookAndSound` gets `version + clips.length` so recommendations refresh when clips change.
-- **Messages**: "No clips yet. Use Smart edit above, or select a video in the Media library, set In / Out and add it here."; export progress (see below); failed → red `job.error`; cancelled → "Export cancelled. No file was left behind."; completed → `Report`; errors red at the bottom.
-- **Constants**: `PRESETS` (landscape "Landscape 16:9 · 1920×1080", story "Story 9:16 · 1080×1920", reels "Reels 9:16 · 1080×1920", archive "Archive · source size and frame rate"); `TRANSITIONS` (fade Cross dissolve, fadeblack Dip to black, dissolve Film dissolve (grain), smoothleft Smooth slide, slideleft Slide, wipeleft Wipe, circleopen Circle open — FFmpeg xfade names); `COLORS` (none Natural, warm, cool, vivid, cinematic teal & orange, vintage, bw Black & white); `AUDIO_EXTENSIONS` = mp3, m4a, aac, wav, flac, ogg, opus; class strings `linkClass`, `field`, `label`; `minutes(ms)` → `m:ss`.
+- **Events**: `job-updated` filtered to `media.export` of this project (exports started from Smart edit appear too).
+- **Actions**: card actions = export-format select (`PRESETS`; sets `fill` for story/reels) + **Export video**; per clip caption, **↑ ↓ Remove**; every Look & sound change saved at once (`setExportOptions`); **Cancel** during export.
+- **Display**: export progress and report at the top of the card; rows with number, `Thumb`, file, caption, in → out, length; footer "About <total> · rendered from the original files" (estimate: Σ − (n−1) × min(transition, half the shortest clip); the export clamps per join and `auto` varies the length).
+- **Constants**: `PRESETS`, `TRANSITIONS` (`auto` Automatic (by recording time), `fade` Cross dissolve, `fadeblack` Dip to black, `dissolve` Film dissolve (grain), `smoothleft`, `slideleft`, `wipeleft`, `circleopen`), `COLORS`, `AUDIO_EXTENSIONS`, `label`, `minutes(ms)` — all labels bilingual.
 
 ### MediaLibrary.tsx
 
-- **Purpose**: import videos, run background analysis/tagging/transcription, browse/search the library, preview a clip with scenes and transcript, set In/Out and add to the open project, favorite/exclude/remove media.
-- **Props**: `project: Project | null`, `onClipAdded()`.
-- **State**: `media: Media[] | null`, `importJob`, `job` (latest background job: proxy/analyze/transcribe/tag), `selected: number | null`, `error`, `speechModel` (default `"whisper-small"`), `query`.
-- **Sub-components**:
-  - `SceneCard({s, onPick})` — scene frame (`convertFileSrc(framePath)`), `clock(start)–clock(end)`, total technical score 0–100 coloured (≥70 green, ≥40 amber, else red), top 3 positive tags (score ≥ 0.1, Vietnamese names, sky), negative tags ≥ 0.15 as `⚠ vi` (amber), `flags` joined. Tooltip lists the five sub-scores.
-  - `Preview({m, project, onClipAdded})` — `<video controls autoPlay>` of the proxy (`key={m.id}`), or thumbnail + "Preview is available once the proxy is created."; path line "preview proxy only; exports always use the original file"; scene strip (when `sceneCount !== null`, via `listScenes`); transcript panel (when `transcribed`, via `getTranscript`) with model, language, warning about machine transcription, "No speech found." for zero segments, clickable lines; In/Out bar (only with a proxy): **Set In** / **Set Out** from `video.currentTime`, In/Out/length clocks, **Add to <project>** (disabled without project or when out ≤ in; label "Open a project to add clips") → `addClip` → "Added <len> to <project>." + `onClipAdded()`. Clicking a scene or transcript line sets In/Out to its range and seeks.
-  - `MediaRow({m, job, selected, onSelect, onRemoved, onError, onChanged})` — table row (click selects/deselects): thumbnail, file name, recorded time (`sourceCreatedAt` local, "–" if invalid), length `m:ss`, display resolution (swapped when `rotation % 180 !== 0`) + fps, `video / audio` codec ("no audio"), size, Analysis status, Speech status, Concepts (top 3 tags ≥ 0.05; tooltip top 8). Actions cell (clicks do not select): **★** favorite toggle, **⊘**/"excluded" toggle (`setMediaMark` with merged mark), **Remove** → confirm **Remove** (`removeMedia`) / **Keep** (tooltip: removed from library and timelines, file stays on disk).
-- **Helpers**: `fold(s)` (NFD, strip diacritics, `đ/Đ→d`, lowercase); `matches(m, q)` (folded path, or positive tag with score ≥ 0.1 matching folded `vi` or `en`); `topTags(tags, n, min)`; `duration`, `resolution`; `working(m, job, kinds, finished)` → `"working N%"` / `"waiting"` / null; `status(m, job)` → working, or `"N scene(s)"`, `"not analysed"` (has proxy), `"–"`; `speech(m, job)` → `"no audio"`, working, `"transcribed"`, `"–"`; `active(job)`.
-- **Commands**: `listMedia`, `submitJob` (`media.import`, `media.analyze`, `media.tag`, `media.transcribe`), `cancelJob`, `listScenes`, `getTranscript`, `addClip`, `setMediaMark`, `removeMedia`.
-- **Events**: `media.import` → `importJob`; on completion reload and auto-submit `media.analyze` for the imported `ids`. Kinds in `BACKGROUND` → `job`; reload when the job leaves `running` or when `floor(done / STEP)` advances (one file finished).
-- **Actions**:
-  - **Add videos** (disabled while an import is active) → `open({ multiple: true, title: "Add videos", filters: Videos VIDEO_EXTENSIONS })` → `media.import { paths }`.
-  - **Analyze N videos** (when some have `sceneCount === null` and no background job is active) → `media.analyze { ids, quality: "balanced" }` (creates missing proxies first).
-  - **Tag N videos** (`tags === null`) → `media.tag { ids }`.
-  - Speech model `<select>` (Whisper base (faster) / Whisper small (more accurate)) + **Transcribe N videos** (has audio, not transcribed) → `media.transcribe { ids, model, language: "auto" }`.
-  - Search input (shown when the library is non-empty; placeholder "Search by file name or visual concept (xe đạp, beach, hoàng hôn…)").
-  - **Cancel** links on the import line and the background-job line.
-- **Messages**: privacy note (videos read in place; proxies/frames in the data folder's cache); "Reading metadata… done/total"; `JOB_LABEL[kind]` + percent; failed import/job red; import result "Added or refreshed N video(s)." + per-file failures amber (`name: error`); batch `failed[]` amber `#id: error`; "No videos yet."; "No match.".
-- **Constants**: `VIDEO_EXTENSIONS` = mp4, mov, m4v, mkv, avi, mts, m2ts, 3gp, webm, wmv (FFprobe decides what is a video); `STEP = 1000`; `BACKGROUND` = media.proxy, media.analyze, media.transcribe, media.tag; `JOB_LABEL` ("Creating preview proxies…", "Analysing scenes and image quality…", "Transcribing speech (whisper.cpp, on this computer)…", "Recognising visual concepts (OpenCLIP, on this computer)…"); `linkClass`, `buttonClass`.
+- **Purpose**: the Library page: import videos (analysed automatically), one-click analysis of what is missing, search, preview with scenes and transcript, In/Out and add to the open project, favorite / exclude / remove.
+- **Props**: `project: Project | null`, `version`, `onClipAdded()`, `onSettings()` (opens Settings for missing AI models).
+- **State**: `media`, `models`, `importJob`, `job` (latest proxy/analyze/tag/transcribe job), `selected`, `error`, `query`.
+- **Sub-components**: `SceneCard({s, onPick})` (frame, range, technical score coloured, top tags, ⚠ negative tags, flags); `Preview({m, project, onClipAdded})` (proxy video or thumbnail, path line, scene strip, transcript lines, Set In / Set Out, **Add to <project>**); `MediaRow` (thumbnail, file, recorded, length, resolution + fps, size, Analysis, Speech, On screen; ★, ⊘, Remove with inline confirm).
+- **Helpers**: `fold`, `matches`, `topTags`, `duration`, `resolution`, `working`, `status`, `speech` (bilingual texts).
+- **Commands**: `listMedia`, `listModels`, `submitJob` (`media.import`, and through `ui::prepareMedia` `media.analyze`, `media.tag`, `media.transcribe`), `cancelJob`, `listScenes`, `getTranscript`, `addClip`, `setMediaMark`, `removeMedia`.
+- **Events**: `media.import` → `importJob`; on completion `prepareMedia` for the imported ids (analysis, then tagging and speech when the models are installed). `BACKGROUND` kinds → `job`; reload when a file finishes or the job ends.
+- **Actions**: **+ Add videos** (card action, also in the empty state); **Analyse (N steps)** (when `preparation` lists work and nothing runs; tooltip lists the three steps); search input; Cancel links on job lines. The speech model is chosen automatically (Whisper small when installed, else base).
+- **Messages**: privacy note + "New videos are analysed automatically"; link "Settings › AI models" when a model is missing; job label + % + progress bar; import result and per-file failures; empty state with a button; "No match.".
+- **Constants**: `VIDEO_EXTENSIONS`, `STEP = 1000`, `BACKGROUND`.
+
+### PhotoEditor.tsx
+
+- **Purpose**: the Photos page (ADR 0006, slice B1): add photos (read in place), pick one, edit with classical tools, export a full-size copy. Original files are never written.
+- **Props**: none (keyed on the data root).
+- **State** (`PhotoEditor`): `photos`, `selected`, `importing`, `message`, `confirming` (remove). (`Editor`): `edits`, `history` (≤ 50 undo steps), `showMask`, `before` (URL), `showBefore`, `band` (HSL band), `message`, `working`.
+- **Sub-components / hooks**: `usePreview(id, edits, showMask, onError)` — 80 ms after a change, one `previewPhoto` in flight, the latest edits win, returns `{url, busy}`; `Editor({photo, onChanged})`.
+- **Commands**: `listPhotos`, `importPhotos`, `setPhotoEdits`, `previewPhoto`, `autoPhoto`, `exportPhoto`, `removePhoto`.
+- **Actions**: **+ Add photos** (dialog, `PHOTO_EXTENSIONS`; first imported photo selected; per-file failures shown); thumbnail grid (✎ badge when edited; ✕ on hover → inline **Remove** / **Keep**); **✦ Auto** (merges `autoPhoto` values into the sliders); **↶ Undo**; **Reset**; **Hold: original** (press and hold shows `before`); **Show sky area** (mask overlay); **Export photo** (saves edits, then `exportPhoto`; path + copy link). Sliders save 500 ms after the last change (one undo step per save); double-click a slider label resets it.
+- **Panels** (`GROUPS`): Light (exposure, contrast, highlights, shadows, whites, blacks) · Colour (temperature, tint, vibrance, saturation, look select `LOOKS`, "One colour (HSL)" with 8 `BANDS` × hue / saturation / lightness) · Sky (enhance 0–100, cool ↔ warm; note that the photo's own sky is enhanced, nothing pasted) · Detail (clarity, dehaze, sharpen 0–100 edges only, noise reduction 0–100) · Effects & frame (vignette, straighten ±15°, rotate ⟲ ⟳, crop `CROPS`).
+- **Constants**: `PHOTO_EXTENSIONS`, `GROUPS`, `LOOKS`, `BANDS`, `CROPS` — labels bilingual.
 
 ### AiCenter.tsx
 
-- **Purpose**: AI worker status, device validation, and the log of non-media, non-model jobs.
+- **Purpose**: the Jobs page: every job of this session (newest first), AI worker status, device validation.
 - **Props**: none.
-- **State**: `jobs: Job[]`, `worker: WorkerInfo | null`, `error`.
-- **Sub-components**: `DeviceTable({devices})` (Device, Result "works"/error, Precision, Compile ms, Inference ms; row tooltip = device name); `JobRow({job})` (`#id kind`, status + `done/total` while running, progress bar, **Cancel** while queued/running, red error, `DeviceTable` when `result.devices` exists).
+- **State**: `jobs`, `worker`, `error`.
+- **Sub-components**: `DeviceTable({devices})`; `JobRow({job})` (`#id` + `jobLabel(kind)`, status, `Progress`, **Cancel**, error, device table).
 - **Commands**: `listJobs`, `getWorkerInfo`, `submitJob("validate_devices")`, `cancelJob`.
-- **Events**: every `job-updated` upserts the job into the list and re-reads `getWorkerInfo()`.
-- **Actions**: **Validate AI devices** (disabled while a `validate_devices` job is queued/running).
-- **Display**: "AI worker running · Python X · OpenVINO Y|unavailable · devices a, b|none" or "AI worker not running (starts automatically when a job needs it)."; `runtimeError` amber. List shows jobs whose kind does not start with `media.` or `models.`, newest first (in practice `validate_devices`).
+- **Events**: every `job-updated` upserts the job and re-reads `getWorkerInfo()`.
+- **Actions**: **Validate AI devices** (card action; disabled while one runs).
 - **Constants**: `ACTIVE = {queued, running}`.
 
 ### Models.tsx
 
-- **Purpose**: "AI models" card — model manifests with install state, download (with confirmation), offline install from files, remove.
+- **Purpose**: "AI models" card (Settings page) — model manifests with install state, download (with confirmation), offline install from files, remove.
 - **Props**: none.
 - **State**: `models: ModelInfo[]`, `jobs: Record<modelId, Job>` (latest `models.install` per model), `error`. `ModelRow`: `confirming`, `error`.
 - **Sub-components**: `ModelRow({m, job, onChanged})`; helper `size(m)` → total `formatBytes` when every artifact has `sizeBytes`, else "size not verified".
@@ -322,8 +320,8 @@ Local result types (not in api.ts): `ImportResult { imported, ids, failed[]{path
   - **Install from files…** → `open({ multiple: true })`; each manifest artifact is matched by case-insensitive file name (a single artifact + single pick matches regardless of name); missing → "Select these files: …" → `models.install { id, files }`.
   - **Remove** (when state is not `not_installed` and not in `WORKING`) → `removeModel(id)`.
   - **Cancel** replaces the buttons while the install job is queued/running.
-- **Display**: name · category · size · runtimes; description; state text (underscores → spaces; green `ready`, red failed states, grey otherwise) + install percent while running; `downloadBlocker` text when not installed; `m.error` red; "Load test: DEVICE ok (compile X ms, run Y ms) · …" from `details.devices`. Intro: models are optional, nothing downloads without confirmation.
-- **Constants**: `WORKING` = downloading, verifying, installing, validating; `FAILED` = download_failed, checksum_failed, install_failed, model_load_failed, incompatible; `linkClass`, `fileName`.
+- **Display**: name · category · size · runtimes; description; state text (underscores → spaces; green `ready`, red failed states, grey otherwise) + install percent while running; `downloadBlocker` text when not installed; `m.error` red; "Load test: DEVICE ok (compile X ms, run Y ms) · …" from `details.devices`. Intro: models are optional and local, what OpenCLIP / Whisper add to Smart edit, nothing downloads without confirmation. All labels bilingual.
+- **Constants**: `WORKING` = downloading, verifying, installing, validating; `FAILED` = download_failed, checksum_failed, install_failed, model_load_failed, incompatible; `linkClass` (= `btn.link`); `fileName` from ui.tsx.
 
 ---
 
@@ -331,46 +329,35 @@ Local result types (not in api.ts): `ImportResult { imported, ids, failed[]{path
 
 | Job kind | Shown in | Reading of `done/total` | Cancel |
 |---|---|---|---|
-| `validate_devices` (and any other non-`media.`/`models.` kind) | AiCenter `JobRow` | `done/total` text + bar `done/total×100%` | **Cancel** per row |
-| `media.import` | MediaLibrary "Reading metadata… done/total" | files read / file count | link on that line |
-| `media.analyze`, `media.proxy`, `media.tag`, `media.transcribe` | MediaLibrary job line (`JOB_LABEL` + overall %) and per-row Analysis / Speech / Concepts cells | `total = files × 1000`; file at index `i` in `params.ids` is at `(done − i×1000)/1000`; 1–99 % → "working N%", otherwise "waiting" (until its row data changes) | link on the job line |
-| `media.export` | Timeline (filtered by `params.projectId`) | `total = 1000`: Rust reports 0–50 music download, 50–900 render, 900–1000 validation; UI shows "Waiting for other jobs…" (queued), "Rendering…" (`done < 900`), "Validating output…" (≥ 900), percent and bar | **Cancel** next to the label |
-| `models.install` | Models row state text + percent | `done/total×100` | **Cancel** replaces row buttons |
+| any | `JobBar` (bottom, every page) and Jobs page `JobRow` | first queued/running job: label, %, bar; "+N waiting" | **Cancel** |
+| `media.import` | Library "Reading video metadata… done/total" | files read / file count | link on that line |
+| `media.analyze`, `media.proxy`, `media.tag`, `media.transcribe` | Library job line (label + % + bar) and per-row Analysis / Speech / On screen cells | `total = files × 1000`; file at index `i` is at `(done − i×1000)/1000`; 1–99 % → "working N%", else "waiting" | link on the job line |
+| `media.export` | Timeline (filtered by `params.projectId`) | `total = 1000`: 0–50 music download, 50–900 render, 900–1000 validation; "Waiting for other jobs…", "Rendering from the original files…", "Checking the result…" | **Cancel** |
+| `models.install` | Models row state + percent | `done/total×100` | **Cancel** replaces row buttons |
 
-- Only one job runs at a time (FIFO in Rust), so a queued job just shows "queued"/"waiting".
-- `MediaLibrary.job` keeps only the most recent background job; Analyze/Tag/Transcribe buttons are hidden while it is active.
-- Jobs list is in memory in Rust; `AiCenter` loads `listJobs()` on mount, others only see events after they mount.
-- Cancellation leaves no output file (`.part` + rename in Rust); Timeline says so explicitly.
+- Only one job runs at a time (FIFO in Rust): "Analyse" submits up to three jobs that run one after the other.
+- Jobs list is in memory in Rust; `useJobs()` loads `listJobs()` on mount.
+- Cancellation leaves no output file (`.part` + rename in Rust); Timeline says so.
 
 ---
 
 ## Styling
 
-- **Tailwind v4** via `@tailwindcss/vite`; [index.css](../../apps/desktop/src/index.css) is only `@import "tailwindcss";` and `:root { color-scheme: light dark; }`. No config file, no custom theme, no `@apply`, no CSS modules.
-- **Dark mode**: Tailwind's default `dark:` variant = `prefers-color-scheme` (follows Windows). No toggle. `color-scheme` makes native controls (selects, date inputs, scrollbars) follow too.
-- **Palette** (zinc neutrals + status colours):
-  - Page `bg-zinc-50 / dark:bg-zinc-950`, text `zinc-900 / zinc-100`; cards `bg-white border-zinc-200 / dark:bg-zinc-900 dark:border-zinc-800`; secondary text `text-zinc-500`.
-  - Errors `text-red-600`; warnings and "needs attention" `text-amber-600` (amber-400/500 on the dark preview); success/ready/open `text-green-600`; tag chips in scene cards `text-sky-300`.
-  - Preview area is always dark (`bg-black`, zinc-300/400 text) regardless of theme.
-- **Shared class strings** (repeated per file, not centralised):
-  - Card: `rounded-xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900`; card title `mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500`.
-  - Primary button: `rounded-md bg-zinc-900 px-4 py-1.5 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900` (`buttonClass` in MediaLibrary).
-  - Secondary button: `rounded-md border border-zinc-300 px-3 py-1.5 text-sm … dark:border-zinc-700` (`buttonClass` in EditingPlan).
-  - Link-button: `linkClass = "text-xs text-zinc-500 hover:underline"` (+ disabled variants in Timeline/Models).
-  - Inputs/selects: `rounded-md border border-zinc-300 bg-transparent px-… text-sm dark:border-zinc-700` (`inputClass`, `field`).
-  - Thumbnails `h-9 w-16 rounded object-cover` with a grey placeholder div; progress bar `h-1.5 rounded bg-zinc-200` + inner `bg-zinc-900 dark:bg-zinc-100 transition-all`.
-  - Lists `divide-y divide-zinc-200 dark:divide-zinc-800`; times/paths `font-mono`.
-- **Icons**: Unicode only — `★` favorite, `⊘` exclude, `↑ ↓` reorder, `▶ ■` preview, `♪` music, `⚠` negative tag, `✓ ✗ !` validation, `·` separators, `…` ellipsis.
-- **Responsive**: grid `lg:grid-cols-2`; Look & sound `md:grid-cols-3`; library table in `overflow-x-auto`.
-- No component library; native `<select>`, `<input type=date|range|checkbox>`, `<video>`, `<audio>`, `<table>`. Accessibility: `aria-label` on unlabeled inputs and arrow buttons, `aria-pressed` on toggles, `title` tooltips for details.
+- **Tailwind v4** via `@tailwindcss/vite`; [index.css](../../apps/desktop/src/index.css) is only `@import "tailwindcss";` and `:root { color-scheme: light dark; }`. No config file, no `@apply`.
+- **Dark mode** follows Windows (`prefers-color-scheme`); no toggle.
+- **Palette**: zinc neutrals; **indigo** accent (primary buttons, active nav item, open project, step bar, "Next step" banner, progress bars); red errors, amber warnings / confirmations, green success. The video preview is always dark.
+- **Shared classes** live in [ui.tsx](../../apps/desktop/src/ui.tsx) (`btn`, `field`, `Card`, `Thumb`, `Progress`); a few local class strings remain (`label` in Timeline, preview buttons in MediaLibrary).
+- **Icons**: Unicode only — nav `▦ ✎ ⟳ ⚙`, `★` favorite, `⊘` exclude, `↑ ↓`, `▶ ■`, `♪`, `⚠`, `✓ ✗ !`.
+- **Responsive**: step bar `sm:grid-cols-3`, Settings `lg:grid-cols-2`, Look & sound `md:grid-cols-3`, library table in `overflow-x-auto`.
+- Native controls only; `aria-label` on unlabeled inputs and arrow buttons, `aria-pressed` on toggles.
 
 ---
 
 ## Conventions and how to add UI
 
 - **Add a backend call**: add the Rust command to `generate_handler!` (lib.rs), then one wrapper in [api.ts](../../apps/desktop/src/api.ts): `export const fooBar = (projectId: number) => invoke<T>("foo_bar", { projectId });` with camelCase arg keys and a TS interface mirroring the serde (`rename_all = "camelCase"`) struct; reference the Rust file in a `/** */` comment. Components never import `invoke` directly.
-- **Add a job kind**: add it to `UI_JOB_KINDS` in lib.rs, submit with `submitJob(kind, params)`, and filter `onJobUpdated` by `j.kind` (and by a param such as `projectId` when several instances exist). For list jobs follow the 1000-units-per-file convention so `working()` keeps working. Decide whether AiCenter should show it (it hides `media.*` and `models.*`).
-- **Add a card**: new `src/<Name>.tsx` with a default-exported component using the card class string; mount it in `App.tsx` inside `<div className="lg:col-span-2">`, gated on `settings?.dataRoot && !settings.databaseError` if it touches the DB, keyed on `settings.dataRoot` (plus `project.id` if per project). Share refreshes through App state (like `timelineVersion`), not a store.
+- **Add a job kind**: add it to `UI_JOB_KINDS` in lib.rs, submit with `submitJob(kind, params)`, and filter `onJobUpdated` by `j.kind` (and by a param such as `projectId` when several instances exist). For list jobs follow the 1000-units-per-file convention so `working()` keeps working. Add a label in `ui::jobLabel`.
+- **Add a card**: new `src/<Name>.tsx` with a default-exported component wrapped in `ui::Card`; mount it on a page in `App.tsx` (or add a page to `nav`), gated on `ready` (data root + DB) if it touches the DB, keyed on `settings.dataRoot`. Share refreshes through App `version`, not a store. Write every string as `L("English", "Tiếng Việt")`.
 - **Errors**: every call ends in `.catch((e) => setError(String(e)))` (or `setMessage`); show `{error && <p className="mt-2 text-sm text-red-600">{error}</p>}` in the card. Amber for non-fatal warnings, grey `text-zinc-500` for info/empty states. Destructive actions use an inline confirm (Delete/Remove → confirm + Keep), never `window.confirm`.
 - **Files**: pickers via `@tauri-apps/plugin-dialog` `open()` with explicit extension filters; local images/videos only via `convertFileSrc` on paths under `<data root>\cache` (asset scope + CSP block anything else).
 - **Rules**: the frontend never runs FFmpeg or loads models (CLAUDE.md); exports always render from originals — UI copy says so.

@@ -3,6 +3,8 @@ import {
   cancelJob, getWorkerInfo, listJobs, onJobUpdated, submitJob,
   type DeviceValidation, type Job, type WorkerInfo,
 } from "./api";
+import { L } from "./i18n";
+import { btn, Card, jobLabel, Progress } from "./ui";
 
 const ACTIVE = new Set(["queued", "running"]);
 
@@ -10,13 +12,13 @@ function DeviceTable({ devices }: { devices: DeviceValidation[] }) {
   return (
     <table className="mt-2 w-full text-sm">
       <thead className="text-left text-xs text-zinc-500">
-        <tr><th className="py-1">Device</th><th>Result</th><th>Precision</th><th>Compile</th><th>Inference</th></tr>
+        <tr><th className="py-1">{L("Device", "Thiết bị")}</th><th>{L("Result", "Kết quả")}</th><th>{L("Precision", "Độ chính xác")}</th><th>Compile</th><th>Inference</th></tr>
       </thead>
       <tbody>
         {devices.map((d) => (
           <tr key={d.device} className="border-t border-zinc-200 dark:border-zinc-800" title={d.name}>
             <td className="py-1 font-medium">{d.device}</td>
-            <td className={d.ok ? "text-green-600" : "text-red-600"}>{d.ok ? "works" : (d.error ?? "failed")}</td>
+            <td className={d.ok ? "text-green-600" : "text-red-600"}>{d.ok ? L("works", "chạy được") : (d.error ?? L("failed", "lỗi"))}</td>
             <td>{d.precision ?? "–"}</td>
             <td>{d.compileMs != null ? `${d.compileMs} ms` : "–"}</td>
             <td>{d.inferMs != null ? `${d.inferMs} ms` : "–"}</td>
@@ -33,16 +35,14 @@ function JobRow({ job }: { job: Job }) {
   return (
     <li className="py-2">
       <div className="flex items-center gap-3 text-sm">
-        <span className="font-medium">#{job.id} {job.kind}</span>
+        <span className="font-medium">#{job.id} {jobLabel(job.kind)}</span>
         <span className="text-zinc-500">{job.status}{job.status === "running" && job.total > 0 ? ` ${job.done}/${job.total}` : ""}</span>
         {ACTIVE.has(job.status) && (
-          <button className="ml-auto text-xs text-zinc-500 hover:underline" onClick={() => cancelJob(job.id)}>Cancel</button>
+          <button className="ml-auto text-xs text-zinc-500 hover:underline" onClick={() => cancelJob(job.id)}>{L("Cancel", "Huỷ")}</button>
         )}
       </div>
       {job.status === "running" && (
-        <div className="mt-1 h-1.5 overflow-hidden rounded bg-zinc-200 dark:bg-zinc-800">
-          <div className="h-full bg-zinc-900 transition-all dark:bg-zinc-100" style={{ width: `${pct}%` }} />
-        </div>
+        <div className="mt-1"><Progress value={pct / 100} /></div>
       )}
       {job.error && <p className="mt-1 text-sm text-red-600">{job.error}</p>}
       {devices && <DeviceTable devices={devices} />}
@@ -71,27 +71,22 @@ export default function AiCenter() {
   const busy = jobs.some((j) => j.kind === "validate_devices" && ACTIVE.has(j.status));
 
   return (
-    <section className="rounded-xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">AI Center</h2>
-        <button
-          className="rounded-md bg-zinc-900 px-4 py-1.5 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
-          disabled={busy}
-          onClick={() => submitJob("validate_devices").catch((e) => setError(String(e)))}
-        >
-          Validate AI devices
-        </button>
-      </div>
+    <Card title={L("Jobs and AI worker", "Công việc và AI worker")} actions={
+      <button className={btn.secondary} disabled={busy} onClick={() => submitJob("validate_devices").catch((e) => setError(String(e)))}>
+        {L("Validate AI devices", "Kiểm tra thiết bị AI")}
+      </button>
+    }>
       <p className="text-sm text-zinc-500">
         {worker
-          ? `AI worker running · Python ${worker.python} · OpenVINO ${worker.openvino ?? "unavailable"} · devices ${worker.devices.join(", ") || "none"}`
-          : "AI worker not running (starts automatically when a job needs it)."}
+          ? `${L("AI worker running", "AI worker đang chạy")} · Python ${worker.python} · OpenVINO ${worker.openvino ?? "–"} · ${L("devices", "thiết bị")} ${worker.devices.join(", ") || "–"}`
+          : L("AI worker not running (starts automatically when a job needs it).", "AI worker chưa chạy (tự khởi động khi có việc cần).")}
       </p>
       {worker?.runtimeError && <p className="text-sm text-amber-600">{worker.runtimeError}</p>}
       {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
       <ul className="mt-2 divide-y divide-zinc-200 dark:divide-zinc-800">
-        {jobs.filter((j) => !j.kind.startsWith("media.") && !j.kind.startsWith("models.")).reverse().map((j) => <JobRow key={j.id} job={j} />)}
+        {jobs.length === 0 && <li className="py-2 text-sm text-zinc-500">{L("No jobs in this session yet.", "Chưa có công việc nào trong phiên này.")}</li>}
+        {[...jobs].reverse().map((j) => <JobRow key={j.id} job={j} />)}
       </ul>
-    </section>
+    </Card>
   );
 }

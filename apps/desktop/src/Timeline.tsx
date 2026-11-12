@@ -1,53 +1,54 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   cancelJob, getExportOptions, listClips, listMedia, listSounds, moveClip, onJobUpdated, recommendSounds, removeClip, setClipCaption, setExportOptions, submitJob,
   type Clip, type ExportOptions, type ExportPreset, type ExportResult, type Job, type Media, type Project, type SoundRecommendation, type Track,
 } from "./api";
+import { L } from "./i18n";
+import { btn, Card, field, fileName, Progress, Thumb } from "./ui";
 
 const PRESETS: { id: ExportPreset; label: string }[] = [
-  { id: "landscape", label: "Landscape 16:9 · 1920×1080" },
-  { id: "story", label: "Story 9:16 · 1080×1920" },
-  { id: "reels", label: "Reels 9:16 · 1080×1920" },
-  { id: "archive", label: "Archive · source size and frame rate" },
+  { id: "landscape", label: L("Landscape 16:9 · 1920×1080", "Ngang 16:9 · 1920×1080") },
+  { id: "story", label: L("Story 9:16 · 1080×1920", "Story 9:16 · 1080×1920") },
+  { id: "reels", label: L("Reels 9:16 · 1080×1920", "Reels 9:16 · 1080×1920") },
+  { id: "archive", label: L("Archive · source size and frame rate", "Lưu trữ · giữ kích thước và tốc độ khung gốc") },
 ];
 const TRANSITIONS: [string, string][] = [
-  ["fade", "Cross dissolve"], ["fadeblack", "Dip to black"], ["dissolve", "Film dissolve (grain)"],
-  ["smoothleft", "Smooth slide"], ["slideleft", "Slide"], ["wipeleft", "Wipe"], ["circleopen", "Circle open"],
+  ["auto", L("Automatic (by recording time)", "Tự động (theo thời gian quay)")], ["fade", L("Cross dissolve", "Hoà mờ")],
+  ["fadeblack", L("Dip to black", "Mờ qua đen")], ["dissolve", L("Film dissolve (grain)", "Hoà hạt (film)")],
+  ["smoothleft", L("Smooth slide", "Trượt mượt")], ["slideleft", L("Slide", "Trượt")], ["wipeleft", L("Wipe", "Quét")], ["circleopen", L("Circle open", "Mở tròn")],
 ];
 const COLORS: [string, string][] = [
-  ["none", "Natural (no grade)"], ["warm", "Warm"], ["cool", "Cool"], ["vivid", "Vivid"],
-  ["cinematic", "Cinematic (teal & orange)"], ["vintage", "Vintage"], ["bw", "Black & white"],
+  ["none", L("Natural (no grade)", "Tự nhiên")], ["warm", L("Warm", "Ấm")], ["cool", L("Cool", "Lạnh")], ["vivid", L("Vivid", "Rực rỡ")],
+  ["cinematic", L("Cinematic (teal & orange)", "Điện ảnh")], ["vintage", L("Vintage", "Cổ điển")], ["bw", L("Black & white", "Đen trắng")],
 ];
 const AUDIO_EXTENSIONS = ["mp3", "m4a", "aac", "wav", "flac", "ogg", "opus"];
-const linkClass = "text-xs text-zinc-500 hover:underline disabled:opacity-30";
-const field = "rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700";
 const label = "flex items-center gap-2 text-xs text-zinc-500";
 
 export const clock = (ms: number) => {
   const t = ms / 1000;
   return `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, "0")}`;
 };
-const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
 function Report({ r }: { r: ExportResult }) {
   const v = r.validation;
+  const [copied, setCopied] = useState(false);
   return (
-    <div className={`mt-3 rounded-lg border p-3 text-sm ${v.ok ? "border-green-600/40" : "border-red-600/60"}`}>
-      <p className={`font-medium ${v.ok ? "text-green-600" : "text-red-600"}`}>
-        {v.ok ? "Export finished and passed validation" : "Export finished but FAILED validation"}
+    <div className={`mt-3 rounded-xl border p-3 text-sm ${v.ok ? "border-green-600/40 bg-green-50 dark:bg-green-950/20" : "border-red-600/60"}`}>
+      <p className={`font-medium ${v.ok ? "text-green-700 dark:text-green-400" : "text-red-600"}`}>
+        {v.ok ? L("✓ Export finished and passed validation", "✓ Đã xuất xong và qua kiểm tra") : L("Export finished but FAILED validation", "Đã xuất nhưng KHÔNG qua kiểm tra")}
       </p>
-      <p className="mt-1 break-all font-mono text-xs">{r.path}</p>
+      <p className="mt-1 flex flex-wrap items-center gap-2">
+        <span className="break-all font-mono text-xs">{r.path}</span>
+        <button className={btn.link} onClick={() => navigator.clipboard.writeText(r.path).then(() => setCopied(true)).catch(() => {})}>
+          {copied ? L("copied", "đã chép") : L("copy path", "chép đường dẫn")}
+        </button>
+      </p>
       <p className="mt-1 text-xs text-zinc-500">
-        {r.width}×{r.height} · {clock(r.durationMs)} · rendered in {r.renderSeconds} s ({r.encoder})
+        {r.width}×{r.height} · {clock(r.durationMs)} · {L("rendered in", "dựng trong")} {r.renderSeconds} s ({r.encoder})
       </p>
       <ul className="mt-2 text-xs">
-        {v.checks.map((c) => (
-          <li key={c.name} className={c.ok ? "text-zinc-500" : "text-red-600"}>
-            {c.ok ? "✓" : "✗"} {c.name}: {c.detail}
-          </li>
-        ))}
+        {v.checks.map((c) => <li key={c.name} className={c.ok ? "text-zinc-500" : "text-red-600"}>{c.ok ? "✓" : "✗"} {c.name}: {c.detail}</li>)}
         {v.warnings.map((w) => <li key={w} className="text-amber-600">! {w}</li>)}
       </ul>
     </div>
@@ -60,7 +61,7 @@ function CaptionField({ clip, onSaved, onError }: { clip: Clip; onSaved: () => v
   useEffect(() => setText(clip.caption ?? ""), [clip.caption]);
   return (
     <input className="w-48 rounded border border-transparent bg-transparent px-1 text-xs hover:border-zinc-300 focus:border-zinc-400 dark:hover:border-zinc-700"
-      placeholder="Caption (optional)" value={text} maxLength={200} aria-label="Clip caption"
+      placeholder={L("Caption (optional)", "Chú thích (tuỳ chọn)")} value={text} maxLength={200} aria-label={L("Clip caption", "Chú thích clip")}
       onChange={(e) => setText(e.target.value)}
       onBlur={() => { if (text !== (clip.caption ?? "")) setClipCaption(clip.id, text).then(onSaved).catch((e) => onError(String(e))); }} />
   );
@@ -86,43 +87,43 @@ function MusicLibrary({ projectId, version, current, onUse, onClose }: {
     const a = audio.current!;
     if (playing === t.id) { a.pause(); setPlaying(null); return; }
     a.src = t.url;
-    a.play().then(() => setPlaying(t.id)).catch(() => setError("Preview needs an internet connection."));
+    a.play().then(() => setPlaying(t.id)).catch(() => setError(L("Preview needs an internet connection.", "Nghe thử cần kết nối internet.")));
   }
   const moods = ["all", ...Array.from(new Set(tracks.flatMap((t) => t.moods))).sort()];
   const byId = new Map(tracks.map((t) => [t.id, t]));
   const row = (t: Track, why?: string[]) => (
     <li key={t.id} className={`flex items-center gap-2 py-1 text-xs ${current === t.id ? "text-green-600" : ""}`}>
-      <button className="w-6 rounded border border-zinc-300 text-center dark:border-zinc-700" onClick={() => toggle(t)} aria-label={`Preview ${t.title}`}>
+      <button className="w-6 rounded border border-zinc-300 text-center dark:border-zinc-700" onClick={() => toggle(t)} aria-label={`${L("Preview", "Nghe thử")} ${t.title}`}>
         {playing === t.id ? "■" : "▶"}
       </button>
       <span className="min-w-0 flex-1 truncate" title={t.credit}>
-        <span className="font-medium">{t.title}</span> <span className="text-zinc-500">· {t.moods.join(", ")} · {t.energy} energy · {minutes(t.durationMs)}</span>
+        <span className="font-medium">{t.title}</span> <span className="text-zinc-500">· {t.moods.join(", ")} · {t.energy} · {minutes(t.durationMs)}</span>
         {why && <span className="block truncate text-zinc-500">{why.join(" · ")}</span>}
       </span>
-      <button className="rounded border border-zinc-300 px-2 dark:border-zinc-700" onClick={() => onUse(t)}>{current === t.id ? "Chosen" : "Use"}</button>
+      <button className="rounded border border-zinc-300 px-2 dark:border-zinc-700" onClick={() => onUse(t)}>{current === t.id ? L("Chosen", "Đã chọn") : L("Use", "Dùng")}</button>
     </li>
   );
   return (
     <div className="mt-2 rounded-md border border-zinc-200 p-2 dark:border-zinc-800">
       <audio ref={audio} onEnded={() => setPlaying(null)} />
       <div className="flex items-center justify-between">
-        <p className="text-xs font-semibold text-zinc-500">Free music library · {tracks.length} tracks</p>
-        <button className={linkClass} onClick={onClose}>Close</button>
+        <p className="text-xs font-semibold text-zinc-500">{L("Free music library", "Thư viện nhạc miễn phí")} · {tracks.length}</p>
+        <button className={btn.link} onClick={onClose}>{L("Close", "Đóng")}</button>
       </div>
       <p className="mt-1 text-xs text-zinc-500">
-        Music by Kevin MacLeod (incompetech.com), free under CC BY 4.0 — the required credit is added at the end of the video.
-        Preview streams from the internet; a chosen track is downloaded only while exporting and deleted right after.
+        {L("Music by Scott Buckley (scottbuckley.com.au) and Kevin MacLeod (incompetech.com), free under CC BY 4.0 — the required credit is added at the end of the video; also put it in the post caption. Preview streams from the internet; a chosen track is downloaded once (checked) and kept in the data folder's music folder.",
+          "Nhạc của Scott Buckley (scottbuckley.com.au) và Kevin MacLeod (incompetech.com), miễn phí theo CC BY 4.0 — dòng ghi công bắt buộc được thêm ở cuối video; hãy ghi cả trong phần mô tả bài đăng. Nghe thử cần internet; bài được chọn tải về một lần (có kiểm tra) và giữ trong thư mục music.")}
       </p>
       {recs.length > 0 && (
         <>
-          <p className="mt-2 text-xs font-semibold text-zinc-500">Recommended for this video</p>
+          <p className="mt-2 text-xs font-semibold text-zinc-500">{L("Recommended for this video", "Gợi ý cho video này")}</p>
           <ul>{recs.map((r) => byId.get(r.id) && row(byId.get(r.id)!, r.reasons))}</ul>
         </>
       )}
       <div className="mt-2 flex flex-wrap gap-1">
         {moods.map((m) => (
           <button key={m} className={`rounded-full border px-2 text-xs ${mood === m ? "border-zinc-900 dark:border-zinc-100" : "border-zinc-300 text-zinc-500 dark:border-zinc-700"}`}
-            onClick={() => setMood(m)}>{m}</button>
+            onClick={() => setMood(m)}>{m === "all" ? L("all", "tất cả") : m}</button>
         ))}
       </div>
       <ul className="mt-1 max-h-56 overflow-y-auto">{tracks.filter((t) => mood === "all" || t.moods.includes(mood)).map((t) => row(t))}</ul>
@@ -142,81 +143,80 @@ function LookAndSound({ o, projectId, version, onChange, onError }: {
   const titles = (change: Partial<ExportOptions["titles"]>) => set({ titles: { ...o.titles, ...change } });
   async function pickMusic() {
     try {
-      const picked = await open({ multiple: false, title: "Background music (your own file)", filters: [{ name: "Audio", extensions: AUDIO_EXTENSIONS }] });
+      const picked = await open({ multiple: false, title: L("Background music (your own file)", "Nhạc nền (file của bạn)"), filters: [{ name: "Audio", extensions: AUDIO_EXTENSIONS }] });
       if (typeof picked === "string") set({ music: { path: picked, library: null, volume: o.music?.volume ?? 0.35, duck: o.music?.duck ?? true } });
     } catch (e) {
       onError(String(e));
     }
   }
+  const lengths: [number, string][] = [[0, L("Hard cuts", "Cắt thẳng")], [300, L("Short · 0.3 s", "Ngắn · 0.3 s")], [500, L("Medium · 0.5 s", "Vừa · 0.5 s")],
+    [700, L("Medium · 0.7 s", "Vừa · 0.7 s")], [800, L("Slow · 0.8 s", "Chậm · 0.8 s")], [1200, L("Very slow · 1.2 s", "Rất chậm · 1.2 s")]];
   return (
-    <div className="mt-3 grid gap-4 rounded-lg border border-zinc-200 p-3 md:grid-cols-3 dark:border-zinc-800">
+    <div className="mt-4 grid gap-4 rounded-xl border border-zinc-200 p-3 md:grid-cols-3 dark:border-zinc-800">
       <div className="space-y-2">
-        <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Picture</p>
-        <label className={label}>Transitions
+        <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">{L("Picture", "Hình ảnh")}</p>
+        <label className={label}>{L("Transitions", "Chuyển cảnh")}
           <select className={field} value={o.transitionMs} onChange={(e) => set({ transitionMs: Number(e.target.value) })}>
-            {[[0, "Hard cuts"], [300, "Short · 0.3 s"], [500, "Medium · 0.5 s"], [600, "Medium · 0.6 s"], [800, "Slow · 0.8 s"], [1200, "Very slow · 1.2 s"]]
-              .concat([0, 300, 500, 600, 800, 1200].includes(o.transitionMs) ? [] : [[o.transitionMs, `${o.transitionMs / 1000} s`]])
+            {lengths.concat(lengths.some(([v]) => v === o.transitionMs) ? [] : [[o.transitionMs, `${o.transitionMs / 1000} s`]])
               .map(([v, name]) => <option key={v} value={v}>{name}</option>)}
           </select>
         </label>
         {o.transitionMs > 0 && (
-          <label className={label}>Style
+          <label className={label}>{L("Style", "Kiểu")}
             <select className={field} value={o.transition} onChange={(e) => set({ transition: e.target.value })}>
               {TRANSITIONS.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
             </select>
           </label>
         )}
-        <label className={label}>Colour
+        <label className={label}>{L("Colour", "Màu")}
           <select className={field} value={o.color} onChange={(e) => set({ color: e.target.value })}>
             {COLORS.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
           </select>
         </label>
-        <label className={label}><input type="checkbox" checked={o.fill} onChange={(e) => set({ fill: e.target.checked })} /> Fill the frame (crop centre, no black bars)</label>
-        <label className={label}><input type="checkbox" checked={o.fade} onChange={(e) => set({ fade: e.target.checked })} /> Fade in from / out to black</label>
+        <label className={label}><input type="checkbox" checked={o.fill} onChange={(e) => set({ fill: e.target.checked })} /> {L("Fill the frame (crop centre, no black bars)", "Lấp đầy khung (cắt giữa, không viền đen)")}</label>
+        <label className={label}><input type="checkbox" checked={o.fade} onChange={(e) => set({ fade: e.target.checked })} /> {L("Fade in from / out to black", "Mờ dần đầu / cuối video")}</label>
       </div>
       <div className="space-y-2">
-        <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Sound</p>
-        <label className={label}>Clip sound {Math.round(o.originalVolume * 100)}%
+        <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">{L("Sound", "Âm thanh")}</p>
+        <label className={label}>{L("Clip sound", "Tiếng gốc")} {Math.round(o.originalVolume * 100)}%
           <input type="range" min={0} max={1.5} step={0.05} value={o.originalVolume} onChange={(e) => set({ originalVolume: Number(e.target.value) })} />
         </label>
         {o.music ? (
           <>
             {o.music.library ? (
-              <p className="text-xs" title={trackNames.get(o.music.library)?.credit}>♪ {trackNames.get(o.music.library)?.title ?? o.music.library} · free library
-                <span className="block text-zinc-500">Downloaded only while exporting, then deleted; credit added at the end.</span>
-              </p>
+              <p className="text-xs" title={trackNames.get(o.music.library)?.credit}>♪ {trackNames.get(o.music.library)?.title ?? o.music.library} · {L("free library", "thư viện miễn phí")}</p>
             ) : (
-              <p className="truncate text-xs" title={o.music.path}>♪ {fileName(o.music.path)} · your file (kept as is)</p>
+              <p className="truncate text-xs" title={o.music.path}>♪ {fileName(o.music.path)} · {L("your file (kept as is)", "file của bạn (giữ nguyên)")}</p>
             )}
             <p className="text-xs">
-              <button className={linkClass} onClick={() => setLibrary(true)}>Library…</button>{" "}
-              <button className={linkClass} onClick={pickMusic}>Own file…</button>{" "}
-              <button className={linkClass} onClick={() => set({ music: null })}>Remove</button>
+              <button className={btn.link} onClick={() => setLibrary(true)}>{L("Library…", "Thư viện…")}</button>{" "}
+              <button className={btn.link} onClick={pickMusic}>{L("Own file…", "File riêng…")}</button>{" "}
+              <button className={btn.link} onClick={() => set({ music: null })}>{L("Remove", "Bỏ nhạc")}</button>
             </p>
-            <label className={label}>Music {Math.round(o.music.volume * 100)}%
+            <label className={label}>{L("Music", "Nhạc")} {Math.round(o.music.volume * 100)}%
               <input type="range" min={0} max={1.5} step={0.05} value={o.music.volume} onChange={(e) => set({ music: { ...o.music!, volume: Number(e.target.value) } })} />
             </label>
-            <label className={label}><input type="checkbox" checked={o.music.duck} onChange={(e) => set({ music: { ...o.music!, duck: e.target.checked } })} /> Lower the music while people talk</label>
+            <label className={label}><input type="checkbox" checked={o.music.duck} onChange={(e) => set({ music: { ...o.music!, duck: e.target.checked } })} /> {L("Lower the music while people talk", "Giảm nhạc khi có người nói")}</label>
           </>
         ) : (
           <p className="text-xs">
-            <button className={linkClass} onClick={() => setLibrary(true)}>+ Free music library…</button>{" "}
-            <button className={linkClass} onClick={pickMusic} title="Music you own or may use. Looped to the video length and faded out at the end.">+ Your own file…</button>
+            <button className={btn.link} onClick={() => setLibrary(true)}>{L("+ Free music library…", "+ Thư viện nhạc miễn phí…")}</button>{" "}
+            <button className={btn.link} onClick={pickMusic}>{L("+ Your own file…", "+ File nhạc của bạn…")}</button>
           </p>
         )}
         {library && (
           <MusicLibrary projectId={projectId} version={version} current={o.music?.library ?? null} onClose={() => setLibrary(false)}
             onUse={(t) => set({ music: { path: "", library: t.id, volume: o.music?.volume ?? 0.35, duck: o.music?.duck ?? true } })} />
         )}
-        <label className={label}><input type="checkbox" checked={o.normalize} onChange={(e) => set({ normalize: e.target.checked })} /> Even loudness (−16 LUFS, phone / social level)</label>
+        <label className={label}><input type="checkbox" checked={o.normalize} onChange={(e) => set({ normalize: e.target.checked })} /> {L("Even loudness (−16 LUFS, phone / social level)", "Cân âm lượng (−16 LUFS, chuẩn điện thoại / mạng xã hội)")}</label>
       </div>
       <div className="space-y-2">
-        <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Text</p>
-        <input className={`${field} w-full`} placeholder="Opening title" value={o.titles.title} maxLength={80} onChange={(e) => titles({ title: e.target.value })} aria-label="Opening title" />
-        <input className={`${field} w-full`} placeholder="Subtitle (place, date…)" value={o.titles.subtitle} maxLength={80} onChange={(e) => titles({ subtitle: e.target.value })} aria-label="Subtitle" />
-        <input className={`${field} w-full`} placeholder="Ending text" value={o.titles.ending} maxLength={80} onChange={(e) => titles({ ending: e.target.value })} aria-label="Ending text" />
-        <label className={label}><input type="checkbox" checked={o.titles.captions} onChange={(e) => titles({ captions: e.target.checked })} /> Subtitles from speech (transcribed videos)</label>
-        <p className="text-xs text-zinc-500">Per-clip captions: type them next to each clip below.</p>
+        <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">{L("Text", "Chữ")}</p>
+        <input className={`${field} w-full`} placeholder={L("Opening title", "Tiêu đề mở đầu")} value={o.titles.title} maxLength={80} onChange={(e) => titles({ title: e.target.value })} aria-label={L("Opening title", "Tiêu đề mở đầu")} />
+        <input className={`${field} w-full`} placeholder={L("Subtitle (place, date…)", "Dòng phụ (địa điểm, ngày…)")} value={o.titles.subtitle} maxLength={80} onChange={(e) => titles({ subtitle: e.target.value })} aria-label={L("Subtitle", "Dòng phụ")} />
+        <input className={`${field} w-full`} placeholder={L("Ending text", "Chữ kết thúc")} value={o.titles.ending} maxLength={80} onChange={(e) => titles({ ending: e.target.value })} aria-label={L("Ending text", "Chữ kết thúc")} />
+        <label className={label}><input type="checkbox" checked={o.titles.captions} onChange={(e) => titles({ captions: e.target.checked })} /> {L("Subtitles from speech (transcribed videos)", "Phụ đề từ lời nói (video đã nhận dạng)")}</label>
+        <p className="text-xs text-zinc-500">{L("Per-clip captions: type them next to each clip.", "Chú thích từng clip: gõ bên cạnh mỗi clip.")}</p>
       </div>
     </div>
   );
@@ -253,72 +253,67 @@ export default function Timeline({ project, version }: { project: Project; versi
 
   const run = (p: Promise<unknown>) => p.then(load).catch((e) => setError(String(e)));
   const exporting = job && (job.status === "queued" || job.status === "running");
+  // Estimate (the export clamps each transition by its two neighbours and "auto" varies the length per join).
   const overlap = Math.min(options?.transitionMs ?? 0, ...clips.map((c) => (c.outMs - c.inMs) / 2));
   const total = clips.reduce((s, c) => s + c.outMs - c.inMs, 0) - Math.max(0, clips.length - 1) * Math.max(0, overlap);
   const result = job?.status === "completed" ? (job.result as ExportResult) : null;
 
   return (
-    <section className="rounded-xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Timeline · {project.name}</h2>
-        <div className="flex items-center gap-2">
-          <select className={field} value={preset} aria-label="Export format"
-            onChange={(e) => {
-              const p = e.target.value as ExportPreset;
-              setPreset(p);
-              if (options) change({ ...options, fill: p === "story" || p === "reels" });
-            }}>
-            {PRESETS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
-          </select>
-          <button
-            className="rounded-md bg-zinc-900 px-4 py-1.5 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
-            disabled={clips.length === 0 || !!exporting || !options}
-            onClick={() => submitJob("media.export", { projectId: project.id, preset, options }).then(setJob).catch((e) => setError(String(e)))}
-          >
-            Export
-          </button>
+    <Card title={`${L("Timeline", "Timeline")} · ${project.name}`} actions={
+      <>
+        <select className={field} value={preset} aria-label={L("Export format", "Định dạng xuất")}
+          onChange={(e) => {
+            const p = e.target.value as ExportPreset;
+            setPreset(p);
+            if (options) change({ ...options, fill: p === "story" || p === "reels" });
+          }}>
+          {PRESETS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+        </select>
+        <button className={btn.primary} disabled={clips.length === 0 || !!exporting || !options}
+          onClick={() => submitJob("media.export", { projectId: project.id, preset, options }).then(setJob).catch((e) => setError(String(e)))}>
+          {L("Export video", "Xuất video")}
+        </button>
+      </>
+    }>
+      {exporting && (
+        <div className="mb-3 text-sm text-zinc-500">
+          {job!.status === "queued" ? L("Waiting for other jobs…", "Đang chờ việc khác…") : job!.done < 900 ? L("Rendering from the original files…", "Đang dựng từ file gốc…") : L("Checking the result…", "Đang kiểm tra kết quả…")}{" "}
+          {job!.total > 0 && `${Math.round((job!.done / job!.total) * 100)}%`}{" "}
+          <button className={btn.link} onClick={() => cancelJob(job!.id).catch((e) => setError(String(e)))}>{L("Cancel", "Huỷ")}</button>
+          <div className="mt-1"><Progress value={job!.total ? job!.done / job!.total : 0} /></div>
         </div>
-      </div>
+      )}
+      {job?.status === "failed" && <p className="mb-2 text-sm text-red-600">{job.error}</p>}
+      {job?.status === "cancelled" && <p className="mb-2 text-sm text-zinc-500">{L("Export cancelled. No file was left behind.", "Đã huỷ xuất. Không để lại file dở.")}</p>}
+      {result && <Report r={result} />}
       {clips.length === 0 ? (
-        <p className="text-sm text-zinc-500">No clips yet. Use Smart edit above, or select a video in the Media library, set In / Out and add it here.</p>
+        <p className="text-sm text-zinc-500">{L("No clips yet. Use Smart edit (step 2), or select a video in the Library, set In / Out and add it here.",
+          "Chưa có clip. Dùng Dựng tự động (bước 2), hoặc chọn video trong Thư viện, đặt điểm vào / ra rồi thêm vào đây.")}</p>
       ) : (
         <>
-          <ol className="divide-y divide-zinc-200 dark:divide-zinc-800">
+          <ol className="mt-2 max-h-[28rem] divide-y pr-3 divide-zinc-200 overflow-y-auto dark:divide-zinc-800">
             {clips.map((c, i) => {
               const m = media.get(c.mediaId);
               return (
                 <li key={c.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5 text-sm">
                   <span className="w-5 text-right text-xs text-zinc-500">{i + 1}</span>
-                  {m?.thumb ? <img className="h-9 w-16 rounded object-cover" src={convertFileSrc(m.thumb)} alt="" /> : <div className="h-9 w-16 rounded bg-zinc-200 dark:bg-zinc-800" />}
-                  <span className="min-w-0 flex-1 basis-40 truncate" title={m?.path}>{m ? fileName(m.path) : `media #${c.mediaId}`}</span>
+                  <Thumb path={m?.thumb} />
+                  <span className="min-w-0 flex-1 basis-40 truncate" title={m?.path}>{m ? fileName(m.path) : `#${c.mediaId}`}</span>
                   <CaptionField clip={c} onSaved={load} onError={setError} />
                   <span className="font-mono text-xs text-zinc-500">{clock(c.inMs)} → {clock(c.outMs)}</span>
                   <span className="w-14 text-right font-mono text-xs">{clock(c.outMs - c.inMs)}</span>
-                  <button className={linkClass} disabled={i === 0} onClick={() => run(moveClip(c.id, -1))} aria-label="Move earlier">↑</button>
-                  <button className={linkClass} disabled={i === clips.length - 1} onClick={() => run(moveClip(c.id, 1))} aria-label="Move later">↓</button>
-                  <button className={linkClass} onClick={() => run(removeClip(c.id))}>Remove</button>
+                  <button className={btn.link} disabled={i === 0} onClick={() => run(moveClip(c.id, -1))} aria-label={L("Move earlier", "Lên trước")}>↑</button>
+                  <button className={btn.link} disabled={i === clips.length - 1} onClick={() => run(moveClip(c.id, 1))} aria-label={L("Move later", "Xuống sau")}>↓</button>
+                  <button className={btn.link} onClick={() => run(removeClip(c.id))}>{L("Remove", "Bỏ")}</button>
                 </li>
               );
             })}
           </ol>
-          <p className="mt-2 text-right text-xs text-zinc-500">Total {clock(total)} · rendered from the original files</p>
+          <p className="mt-2 text-right text-xs text-zinc-500">{L("About", "Khoảng")} {clock(total)} · {L("rendered from the original files", "dựng từ file gốc")}</p>
         </>
       )}
       {options && <LookAndSound o={options} projectId={project.id} version={version + clips.length} onChange={change} onError={setError} />}
-      {exporting && (
-        <div className="mt-3 text-sm text-zinc-500">
-          {job!.status === "queued" ? "Waiting for other jobs…" : job!.done < 900 ? "Rendering…" : "Validating output…"}{" "}
-          {job!.total > 0 && `${Math.round((job!.done / job!.total) * 100)}%`}{" "}
-          <button className="text-xs hover:underline" onClick={() => cancelJob(job!.id).catch((e) => setError(String(e)))}>Cancel</button>
-          <div className="mt-1 h-1.5 overflow-hidden rounded bg-zinc-200 dark:bg-zinc-800">
-            <div className="h-full bg-zinc-900 transition-all dark:bg-zinc-100" style={{ width: `${job!.total ? (job!.done / job!.total) * 100 : 0}%` }} />
-          </div>
-        </div>
-      )}
-      {job?.status === "failed" && <p className="mt-2 text-sm text-red-600">{job.error}</p>}
-      {job?.status === "cancelled" && <p className="mt-2 text-sm text-zinc-500">Export cancelled. No file was left behind.</p>}
-      {result && <Report r={result} />}
       {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
-    </section>
+    </Card>
   );
 }

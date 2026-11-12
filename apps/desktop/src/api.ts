@@ -173,6 +173,8 @@ export interface Plan {
   skipped: string[];
   candidates: number;
   suggestedTitle: string;
+  /** How the plan was built (length chosen from the footage, coverage clips). */
+  notes?: string[];
 }
 
 export const listStyles = () => invoke<EditingStyle[]>("list_styles");
@@ -312,6 +314,36 @@ export const listProjects = () => invoke<Project[]>("list_projects");
 export const createProject = (name: string) => invoke<Project>("create_project", { name });
 export const renameProject = (id: number, name: string) => invoke<Project>("rename_project", { id, name });
 export const deleteProject = (id: number) => invoke<void>("delete_project", { id });
+
+/** Photo editor (src-tauri/src/photos.rs, workers/ai-worker/photo.py). Edit values are -100..100 (0 = unchanged). */
+export interface PhotoEdits {
+  [key: string]: number | string | Record<string, number[]> | undefined;
+  look?: string;
+  crop?: string;
+  rotate?: number;
+  hsl?: Record<string, number[]>;
+}
+export interface Photo {
+  id: number;
+  path: string;
+  size: number;
+  width: number | null;
+  height: number | null;
+  takenAt: string | null;
+  edits: PhotoEdits | null;
+  importedAt: string;
+  thumb: string | null;
+}
+export interface PhotoImport { ids: number[]; failed: { path: string; error: string }[] }
+export const listPhotos = () => invoke<Photo[]>("list_photos");
+export const importPhotos = (paths: string[]) => invoke<PhotoImport>("import_photos", { paths });
+export const setPhotoEdits = (id: number, edits: PhotoEdits | null) => invoke<void>("set_photo_edits", { id, edits });
+/** Returns the cache file of a ≤ 1600 px preview (`before` = without edits). */
+export const previewPhoto = (id: number, edits: PhotoEdits, showMask: boolean, before: boolean) =>
+  invoke<string>("preview_photo", { id, edits, showMask, before });
+export const autoPhoto = (id: number) => invoke<PhotoEdits>("auto_photo", { id });
+export const exportPhoto = (id: number) => invoke<string>("export_photo", { id });
+export const removePhoto = (id: number) => invoke<void>("remove_photo", { id });
 
 /** Bytes → "18.3 GB" (binary units, as Windows displays them). */
 export function formatBytes(bytes: number): string {

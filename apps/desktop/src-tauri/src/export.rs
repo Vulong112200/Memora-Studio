@@ -101,13 +101,20 @@ pub struct Options {
     /// Licence credit burned in at the end (set by the export job for library music).
     #[serde(skip)]
     pub credit: Option<String>,
+    /// Part of a long timeline (`render_parts`): encoded at higher quality, it is encoded once more when joined.
+    #[serde(skip)]
+    pub intermediate: bool,
+    /// Joins decided from the whole timeline (`render_parts`: the parts and the joining pass no longer know the sources).
+    #[serde(skip)]
+    pub fixed_joins: Option<Vec<Join>>,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
             fill: false, transition_ms: 0, transition: "fade".into(), color: "none".into(), fade: false,
-            original_volume: 1.0, music: None, titles: Titles::default(), normalize: false, credit: None,
+            original_volume: 1.0, music: None, titles: Titles::default(), normalize: false, credit: None, intermediate: false,
+            fixed_joins: None,
         }
     }
 }
@@ -132,7 +139,8 @@ pub fn save_options(c: &rusqlite::Connection, project_id: i64, o: &Options) -> R
     .map(drop)
 }
 
-pub const TRANSITIONS: &[&str] = &["fade", "dissolve", "fadeblack", "smoothleft", "slideleft", "wipeleft", "circleopen"];
+/// "auto" picks a transition per join from the recording time between the two clips (`joins`).
+pub const TRANSITIONS: &[&str] = &["auto", "fade", "dissolve", "fadeblack", "smoothleft", "slideleft", "wipeleft", "circleopen"];
 pub const COLORS: &[&str] = &["none", "warm", "cool", "vivid", "cinematic", "bw", "vintage"];
 const FADE_MS: i64 = 600;
 
@@ -173,24 +181,81 @@ impl Options {
         Ok(())
     }
 
-    /// Transition actually used: never longer than half of the shortest clip.
+    /// Transition at each join (`segs.len() - 1` entries), see `joins`.
     // ponytail: centre crop only; subject-aware (smart) crop needs detections we do not have yet.
-    pub fn transition(&self, segs: &[Segment]) -> i64 {
-        let shortest = segs.iter().map(|s| s.out_ms - s.in_ms).min().unwrap_or(0);
-        if segs.len() < 2 { 0 } else { self.transition_ms.clamp(0, shortest / 2) }
+    pub fn joins(&self, segs: &[Segment]) -> Vec<Join> {
+        let clips: Vec<JoinClip> = segs.iter().map(|s| (s.media.id, s.media.probe.source_created_at.as_deref(), s.in_ms, s.out_ms)).collect();
+        match &self.fixed_joins {
+            Some(fixed) => fixed.iter().zip(clips.windows(2)).map(|(j, w)| (j.0.clone(), clamp_join(j.1, w[0], w[1]))).collect(),
+            None => joins(&self.transition, self.transition_ms, &clips),
+        }
     }
 
     /// Output duration: clip lengths minus the transition overlaps.
     pub fn duration(&self, segs: &[Segment]) -> i64 {
-        segs.iter().map(|s| s.out_ms - s.in_ms).sum::<i64>() - (segs.len() as i64 - 1).max(0) * self.transition(segs)
+        segs.iter().map(|s| s.out_ms - s.in_ms).sum::<i64>() - self.joins(segs).iter().map(|j| j.1).sum::<i64>()
     }
 
     /// Output time at which each segment starts.
     fn starts(&self, segs: &[Segment]) -> Vec<i64> {
-        let d = self.transition(segs);
+        let joins = self.joins(segs);
         let mut t = 0;
-        segs.iter().map(|s| { let start = t; t += s.out_ms - s.in_ms - d; start }).collect()
+        segs.iter().enumerate().map(|(i, s)| { let start = t; t += s.out_ms - s.in_ms - joins.get(i).map_or(0, |j| j.1); start }).collect()
     }
+}
+
+/// A transition between two clips: FFmpeg xfade name and length (ms; 0 = cut).
+pub type Join = (String, i64);
+/// One clip as the transition rules see it: media id, recording start of the file (ISO 8601) when known, in, out.
+pub type JoinClip<'a> = (i64, Option<&'a str>, i64, i64);
+
+/// "auto" (owner feedback 2026-11-11: smoother trip recap). Initial values, tune by eye:
+/// xfade "fade" is the clean cross dissolve ("dissolve" adds grain). The same shot continuing (same file, this
+/// close) gets a short one,
+const AUTO_SAME_SHOT_MS: i64 = 60_000;
+const AUTO_SHORT_MS: i64 = 400;
+/// clips recorded this far apart (a new place, a new part of the day) fade through black,
+const AUTO_CHAPTER_MS: i64 = 20 * 60_000;
+const AUTO_CHAPTER_FADE_MS: i64 = 1_000;
+// everything else gets the chosen length as a cross dissolve.
+
+/// Transition (xfade name, ms) at each join. Every join is clamped to half of each neighbouring clip, so one short
+/// clip no longer shortens every other transition (audit E4) and no clip is covered by both its transitions at once.
+pub fn joins(transition: &str, transition_ms: i64, clips: &[JoinClip]) -> Vec<Join> {
+    clips
+        .windows(2)
+        .map(|w| {
+            let ((ma, ra, _, oa), (mb, rb, ib, _)) = (w[0], w[1]);
+            let (kind, ms) = if transition != "auto" || transition_ms == 0 {
+                (if transition == "auto" { "fade" } else { transition }, transition_ms)
+            } else if ma == mb && (ib - oa).abs() <= AUTO_SAME_SHOT_MS {
+                ("fade", AUTO_SHORT_MS.min(transition_ms))
+            } else if ra.and_then(unix_ms).zip(rb.and_then(unix_ms)).is_some_and(|(a, b)| (b + ib - a - oa).abs() >= AUTO_CHAPTER_MS) {
+                ("fadeblack", AUTO_CHAPTER_FADE_MS.max(transition_ms))
+            } else {
+                ("fade", transition_ms)
+            };
+            (kind.to_string(), clamp_join(ms, w[0], w[1]))
+        })
+        .collect()
+}
+
+fn clamp_join(ms: i64, a: JoinClip, b: JoinClip) -> i64 {
+    ms.clamp(0, (a.3 - a.2).min(b.3 - b.2) / 2)
+}
+
+/// "2026-02-20T02:53:34.000000Z" → milliseconds since 1970 (UTC; FFprobe creation times end in Z).
+pub(crate) fn unix_ms(s: &str) -> Option<i64> {
+    let n = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
+    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
+    let (hh, mm, ss) = (n(11..13).unwrap_or(0), n(14..16).unwrap_or(0), n(17..19).unwrap_or(0));
+    // Days from civil (H. Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    Some(((days * 24 + hh) * 60 + mm) * 60_000 + ss * 1000)
 }
 
 fn ass_time(ms: i64) -> String {
@@ -373,22 +438,23 @@ pub fn build_args(segs: &[Segment], decode: Decode, encoder: Encoder, (w, h, fps
         }
         graph.push_str(&format!("[{a}]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}];"));
     }
-    let d = o.transition(segs);
-    if d == 0 {
+    let joins = o.joins(segs);
+    if joins.iter().all(|j| j.1 == 0) {
         for i in 0..segs.len() {
             graph.push_str(&format!("[v{i}][a{i}]"));
         }
         graph.push_str(&format!("concat=n={}:v=1:a=1[vj][aj];", segs.len()));
     } else {
-        // Chain: each transition starts d before the end of everything joined so far.
+        // Chain: each transition starts its length before the end of everything joined so far.
         let (mut v, mut a, mut offset) = ("v0".to_string(), "a0".to_string(), 0);
         for i in 1..segs.len() {
+            let (t, d) = &joins[i - 1];
+            let d = *d;
             offset += segs[i - 1].out_ms - segs[i - 1].in_ms - d;
             let last = i == segs.len() - 1;
             let (nv, na) = if last { ("vj".to_string(), "aj".to_string()) } else { (format!("x{i}"), format!("y{i}")) };
             graph.push_str(&format!(
                 "[{v}][v{i}]xfade=transition={t}:duration={dur}:offset={off}[{nv}];[{a}][a{i}]acrossfade=d={dur}[{na}];",
-                t = o.transition,
                 dur = secs(d),
                 off = secs(offset),
             ));
@@ -443,11 +509,12 @@ pub fn build_args(segs: &[Segment], decode: Decode, encoder: Encoder, (w, h, fps
     graph.push_str(&format!("[{sound}]{}[a]", af.join(",")));
 
     args.extend(os(&["-filter_complex", &graph, "-map", "[v]", "-map", "[a]", "-t", &secs(total)]));
-    args.extend(os(match encoder {
-        Encoder::Qsv => &["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "22"][..],
-        Encoder::X264 => &["-c:v", "libx264", "-preset", "medium", "-crf", "20"][..],
-    }));
-    args.extend(os(&["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-f", "mp4"]));
+    let (q, crf, audio) = if o.intermediate { ("16", "14", "320k") } else { ("22", "20", "192k") };
+    args.extend(match encoder {
+        Encoder::Qsv => os(&["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", q]),
+        Encoder::X264 => os(&["-c:v", "libx264", "-preset", "medium", "-crf", crf]),
+    });
+    args.extend(os(&["-c:a", "aac", "-b:a", audio, "-movflags", "+faststart", "-f", "mp4"]));
     args
 }
 
@@ -534,9 +601,9 @@ fn stem(p: &Path) -> String {
 }
 
 /// `p` if no file has that name yet, else `name-2.mp4`, `name-3.mp4`, … — an earlier export is never replaced.
-fn free_name(p: &Path) -> PathBuf {
-    let s = stem(p);
-    (1..).map(|i| if i == 1 { p.to_path_buf() } else { p.with_file_name(format!("{s}-{i}.mp4")) }).find(|c| !c.exists()).unwrap()
+pub(crate) fn free_name(p: &Path) -> PathBuf {
+    let (s, ext) = (stem(p), p.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default());
+    (1..).map(|i| if i == 1 { p.to_path_buf() } else { p.with_file_name(format!("{s}-{i}.{ext}")) }).find(|c| !c.exists()).unwrap()
 }
 
 /// Failures another encoder cannot fix (full disk, no write permission): retrying would render twice for nothing.
@@ -571,12 +638,18 @@ pub fn render(
         Some(Err(e)) => return Err(RunError::Failed(format!("Cannot write the titles file: {e}"))),
         None => None,
     };
-    let result = render_with(env, segs, target, o, ass.as_deref(), out, total_ms, progress, cancelled);
+    let result = render_with(env, segs, target, o, ass.as_deref(), out, total_ms, MAX_INPUTS, progress, cancelled);
     if let Some(p) = ass {
         let _ = std::fs::remove_file(p);
     }
     result
 }
+
+/// Originals one FFmpeg run may open. Each open 2.7K HEVC 10-bit decoder holds ~0.4 GB: measured 2026-11-08 on the
+/// owner's 26-clip Nam Cát Tiên recap, one run peaked at 11 GB working set / 12 GB commit (commit limit 34 GB, 2 GB
+/// pagefile). Longer timelines are rendered in parts of this many clips (picture, clip sound and transitions), then
+/// one pass joins the parts with the same transition and adds look, text, music and loudness. Initial value (~4 GB).
+const MAX_INPUTS: usize = 10;
 
 #[allow(clippy::too_many_arguments)]
 fn render_with(
@@ -587,16 +660,21 @@ fn render_with(
     ass: Option<&Path>,
     out: &Path,
     total_ms: i64,
+    max_inputs: usize,
     progress: &dyn Fn(f64),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<&'static str, RunError> {
     let mut last = String::new();
     for (name, decode, encoder) in [("hybrid-qsv", Decode::Hybrid, Encoder::Qsv), ("libx264", Decode::Software, Encoder::X264)] {
-        let result = write_atomically(out, |part| {
-            let mut args = build_args(segs, decode, encoder, target, o, ass);
-            args.push(part.into());
-            run_ffmpeg(env, &args, total_ms, progress, cancelled).map(drop)
-        });
+        let result = if segs.len() <= max_inputs {
+            write_atomically(out, |part| {
+                let mut args = build_args(segs, decode, encoder, target, o, ass);
+                args.push(part.into());
+                run_ffmpeg(env, &args, total_ms, progress, cancelled).map(drop)
+            })
+        } else {
+            render_parts(env, segs, (decode, encoder), target, o, ass, out, max_inputs, progress, cancelled)
+        };
         match result {
             Ok(()) => return Ok(name),
             Err(RunError::Cancelled) => return Err(RunError::Cancelled),
@@ -608,6 +686,56 @@ fn render_with(
         }
     }
     Err(RunError::Failed(last))
+}
+
+/// Long timelines: parts of `max_inputs` clips rendered from the originals into the render cache at high quality
+/// (deleted afterwards, any outcome), then joined. Same timeline as a single pass: every join keeps the transition
+/// decided from the whole timeline, so durations, text and subtitle times do not change.
+#[allow(clippy::too_many_arguments)]
+fn render_parts(
+    env: &MediaEnv,
+    segs: &[Segment],
+    (decode, encoder): (Decode, Encoder),
+    target: (i64, i64, f64),
+    o: &Options,
+    ass: Option<&Path>,
+    out: &Path,
+    max_inputs: usize,
+    progress: &dyn Fn(f64),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), RunError> {
+    let all = o.joins(segs);
+    let size = max_inputs.max(1);
+    let dir = env.cache.join("render");
+    std::fs::create_dir_all(&dir).map_err(|e| RunError::Failed(format!("Cannot create {}: {e}", dir.display())))?;
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|t| t.as_nanos()).unwrap_or(0);
+    let chunks: Vec<&[Segment]> = segs.chunks(size).collect();
+    let mut files = vec![];
+    let mut joined = vec![];
+    for (i, chunk) in chunks.iter().enumerate() {
+        let file = crate::sounds::TempFile(dir.join(format!("part-{}-{nanos}-{i}.mp4", std::process::id())));
+        let fixed = all[i * size..i * size + chunk.len() - 1].to_vec();
+        let part_o = Options { fill: o.fill, fixed_joins: Some(fixed), intermediate: true, ..Options::default() };
+        let ms = part_o.duration(chunk);
+        let mut args = build_args(chunk, decode, encoder, target, &part_o, None);
+        args.push(file.0.clone().into());
+        let share = |f: f64| progress((i as f64 + f) / chunks.len() as f64 * 0.6);
+        run_ffmpeg(env, &args, ms, &share, cancelled)?;
+        let mut media = chunk[0].media.clone();
+        media.path = file.0.to_string_lossy().into();
+        media.probe = media::Probe {
+            duration_ms: ms, width: target.0, height: target.1, rotation: 0, fps: Some(target.2), video_codec: "h264".into(),
+            audio_codec: Some("aac".into()), audio_streams: 1, bitrate: None, source_created_at: None,
+        };
+        joined.push(Segment { media, in_ms: 0, out_ms: ms, caption: None, speech: vec![] });
+        files.push(file);
+    }
+    let join_o = Options { fixed_joins: Some((1..chunks.len()).map(|k| all[k * size - 1].clone()).collect()), ..o.clone() };
+    write_atomically(out, |part| {
+        let mut args = build_args(&joined, decode, encoder, target, &join_o, ass);
+        args.push(part.into());
+        run_ffmpeg(env, &args, join_o.duration(&joined), &|f| progress(0.6 + 0.4 * f), cancelled).map(drop)
+    })
 }
 
 /// Job `media.export`, params `{"projectId": n, "preset": "landscape", "options": Options}`
@@ -665,32 +793,29 @@ pub fn export_job(job: &Job, progress: &dyn Fn(u64, u64), cancelled: &dyn Fn() -
     let staging = planned.with_extension("unvalidated.mp4");
     let expected_ms = o.duration(&segs);
 
-    // Library music: downloaded now, deleted when `_music` drops (after render + validation, any outcome).
+    // Library music: kept in `<data root>\music\` after the first download (verified on every use).
     const TOTAL: u64 = 1000;
     progress(0, TOTAL);
     let mut music_info = serde_json::Value::Null;
-    let _music = match o.music.as_ref().and_then(|m| m.library.clone()) {
-        Some(id) => {
-            let t = match crate::sounds::track(&id) {
-                Ok(t) => t,
-                Err(e) => return Outcome::Failed(e),
-            };
-            match crate::sounds::fetch(&t, &env.cache.join("downloads").join("sounds"), env.job_object, &|f| progress((f * 50.0) as u64, TOTAL), cancelled) {
-                Ok(file) => {
-                    o.music.as_mut().unwrap().path = file.0.to_string_lossy().into();
-                    o.credit = Some(t.credit.clone());
-                    music_info = json!({"title": t.title, "credit": t.credit, "downloadedAndRemoved": true});
-                    Some(file)
-                }
-                Err(e) if cancelled() => {
-                    tracing::info!(error = %e, "library music download cancelled");
-                    return Outcome::Cancelled;
-                }
-                Err(e) => return Outcome::Failed(e),
+    if let Some(id) = o.music.as_ref().and_then(|m| m.library.clone()) {
+        let t = match crate::sounds::track(&id) {
+            Ok(t) => t,
+            Err(e) => return Outcome::Failed(e),
+        };
+        let dir = env.cache.parent().unwrap_or(&env.cache).join("music");
+        match crate::sounds::fetch(&t, &dir, env.job_object, &|f| progress((f * 50.0) as u64, TOTAL), cancelled) {
+            Ok(file) => {
+                o.music.as_mut().unwrap().path = file.to_string_lossy().into();
+                o.credit = Some(t.credit.clone());
+                music_info = json!({"title": t.title, "credit": t.credit, "file": file});
             }
+            Err(e) if cancelled() => {
+                tracing::info!(error = %e, "library music download cancelled");
+                return Outcome::Cancelled;
+            }
+            Err(e) => return Outcome::Failed(e),
         }
-        None => None,
-    };
+    }
     // Rendering is ~85 % of the job, validation (a full decode) the rest.
     let started = Instant::now();
     let encoder = match render(env, &segs, target, &o, &staging, &|f| progress(50 + (f * 850.0) as u64, TOTAL), cancelled) {
@@ -725,7 +850,7 @@ pub fn export_job(job: &Job, progress: &dyn Fn(u64, u64), cancelled: &dyn Fn() -
         "encoder": encoder,
         "renderSeconds": (render_seconds * 10.0).round() / 10.0,
         "durationMs": expected_ms,
-        "transitionMs": o.transition(&segs),
+        "joins": o.joins(&segs),
         "options": o,
         "music": music_info,
         "loudness": loudness,
@@ -780,6 +905,22 @@ mod tests {
             in_ms, out_ms, caption: caption.map(String::from),
             speech: speech.iter().map(|&(a, b, t)| crate::transcribe::Segment { start_ms: a, end_ms: b, text: t.into() }).collect(),
         }
+    }
+
+    #[test]
+    fn auto_joins_follow_recording_time_and_clamp_per_join() {
+        let day = Some("2026-02-20T02:53:34.000000Z");
+        let later = Some("2026-02-20T03:30:00.000000Z");
+        let clips: [JoinClip; 5] = [(1, day, 0, 6_000), (1, day, 20_000, 26_000), (2, day, 0, 6_000), (3, later, 0, 400), (3, later, 5_000, 11_000)];
+        let j = joins("auto", 700, &clips);
+        assert_eq!(j[0], ("fade".into(), 400), "same shot continuing: short dissolve");
+        assert_eq!(j[1], ("fade".into(), 700), "next file a few minutes later");
+        assert_eq!(j[2], ("fadeblack".into(), 200), "36 min later fades through black, clamped by the 0.4 s clip");
+        assert_eq!(j[3], ("fade".into(), 200), "only the joins next to the short clip are shortened");
+        assert_eq!(joins("dissolve", 700, &clips[..3]), [("dissolve".into(), 700), ("dissolve".into(), 700)], "named transitions unchanged");
+        assert_eq!(joins("auto", 0, &clips[..2]), [("fade".into(), 0)], "0 ms = cuts");
+        assert_eq!(unix_ms("1970-01-02T00:00:01Z"), Some(86_401_000));
+        assert_eq!(unix_ms("2026-03-01T00:00:00Z").unwrap() - unix_ms("2026-02-28T00:00:00Z").unwrap(), 86_400_000);
     }
 
     #[test]
@@ -910,11 +1051,11 @@ mod tests {
             fill: true, transition_ms: 400, transition: "dissolve".into(), color: "cinematic".into(), fade: true,
             original_volume: 0.8, music: Some(Music { path: music.to_string_lossy().into(), library: None, volume: 0.5, duck: true }),
             titles: Titles { title: "Đà Lạt – Tháng Hai".into(), subtitle: "Đạp xe".into(), ending: "Hẹn gặp lại".into(), captions: true },
-            normalize: true, credit: None,
+            normalize: true, credit: None, intermediate: false, fixed_joins: None,
         };
         assert!(look.check().is_ok());
-        assert_eq!((look.transition(&segs), look.duration(&segs)), (400, 2100));
-        assert_eq!(Options { transition_ms: 5000, ..Options::default() }.transition(&segs), 500, "clamped to half the shortest clip");
+        assert_eq!((look.joins(&segs), look.duration(&segs)), (vec![("dissolve".to_string(), 400)], 2100));
+        assert_eq!(Options { transition_ms: 5000, ..Options::default() }.joins(&segs)[0].1, 500, "clamped to half the shortest clip");
         let story = Preset::Story.target(&ma);
         let (xf, fit) = (dir.join("xfade.mp4"), dir.join("fit.mp4"));
         if let Err(RunError::Failed(e)) = render(&env, &segs, story, &look, &xf, &|_| {}, &|| false) {
@@ -926,6 +1067,15 @@ mod tests {
         assert!(gain == 0.0 || (after - TARGET_LUFS).abs() < 2.0, "levelled to {after} LUFS (gain {gain})");
         let v = validate(&env, &xf, 2100, segs.len(), story);
         assert!(v.ok, "crossfade export failed validation: {v:?}");
+        // Long-timeline path forced (one original per FFmpeg run): same duration, same checks, parts removed.
+        let parted = dir.join("parted.mp4");
+        let last = Mutex::new(0.0);
+        if let Err(RunError::Failed(e)) = render_with(&env, &segs, story, &look, None, &parted, look.duration(&segs), 1, &|f| *last.lock().unwrap() = f, &|| false) {
+            panic!("render in parts failed: {e}");
+        }
+        let v = validate(&env, &parted, 2100, segs.len(), story);
+        assert!(v.ok && *last.lock().unwrap() > 0.9, "render in parts: {v:?}");
+        assert!(std::fs::read_dir(dir.join("cache").join("render")).unwrap().next().is_none(), "part files removed");
         assert!(render(&env, &segs[..1], story, &Options::default(), &fit, &|_| {}, &|| false).is_ok());
         let fill = dir.join("fill.mp4"); // no fade, so the first frame shows the picture
         assert!(render(&env, &segs[..1], story, &Options { fill: true, ..Options::default() }, &fill, &|_| {}, &|| false).is_ok());
@@ -975,14 +1125,13 @@ fn real_library_export() {
         ffprobe: media::tool_path(None, "ffprobe.exe"), ffmpeg: media::tool_path(None, "ffmpeg.exe"),
         cache: out.parent().unwrap().join("cache"), job_object: &jo, db: &mutex,
     };
-    // Optional library music (MEMORA_MUSIC=<track id>): fetched, used, deleted like in the export job.
-    let _music = std::env::var("MEMORA_MUSIC").ok().map(|id| {
+    // Optional library music (MEMORA_MUSIC=<track id>): fetched once into `music\` next to the output, like the export job.
+    if let Ok(id) = std::env::var("MEMORA_MUSIC") {
         let tr = crate::sounds::track(&id).unwrap();
-        let f = crate::sounds::fetch(&tr, &env.cache.join("downloads").join("sounds"), &jo, &|_| {}, &|| false).unwrap();
-        o.music = Some(Music { path: f.0.to_string_lossy().into(), library: Some(id), volume: 0.35, duck: true });
+        let f = crate::sounds::fetch(&tr, &out.parent().unwrap().join("music"), &jo, &|_| {}, &|| false).unwrap();
+        o.music = Some(Music { path: f.to_string_lossy().into(), library: Some(id), volume: 0.35, duck: true });
         o.credit = Some(tr.credit);
-        f
-    });
+    }
     let t = Instant::now();
     let enc = render(&env, &segs, target, &o, &out, &|_| {}, &|| false).unwrap_or_else(|_| panic!("render failed"));
     if o.normalize {

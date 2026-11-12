@@ -2,7 +2,7 @@
 
 The Python AI worker process: how Rust starts it, protocol v1, its jobs, the analysis and tagging algorithms, and the dev-only OpenCLIP export.
 
-Last verified: 2026-11-08 against commit `b751673`. Index: [README.md](README.md). Kept current by the `sync-docs` skill ([.claude/skills/sync-docs](../../.claude/skills/sync-docs/SKILL.md)).
+Last verified: 2026-11-11 against commit `9ac182c` + uncommitted changes. Index: [README.md](README.md). Kept current by the `sync-docs` skill ([.claude/skills/sync-docs](../../.claude/skills/sync-docs/SKILL.md)).
 
 Sources: [memora_worker.py](../../workers/ai-worker/memora_worker.py), [analysis.py](../../workers/ai-worker/analysis.py),
 [tagging.py](../../workers/ai-worker/tagging.py), [requirements.lock.txt](../../workers/ai-worker/requirements.lock.txt),
@@ -87,7 +87,7 @@ Tested end-to-end by `worker::tests::worker_lifecycle_end_to_end` (skipped when 
 
 ## 3. Jobs (`JOBS` in memora_worker.py)
 
-7 entries (4 product jobs, 3 test-only `diagnostic.*`).
+9 entries (6 product jobs, 3 test-only `diagnostic.*`).
 
 | Kind | Params | Result | Called by |
 |---|---|---|---|
@@ -95,6 +95,8 @@ Tested end-to-end by `worker::tests::worker_lifecycle_end_to_end` (skipped when 
 | `analyze_video` | `path` (proxy), `framesDir` (`cache\frames\<id>`), `quality` (`fast`/`balanced`/`detailed`, default `balanced`) | `analysis.analyze` output, §4 | `analysis::analyze_job` (job `media.analyze`, after `proxy::ensure_proxy`) |
 | `validate_openvino_ir` | `xml` (IR path), `devices` (default `["CPU"]`; Rust does not send it) | `{validation: "openvino-ir", openvino, inputs: [{name, shape}], devices: [{device, compileMs, inferMs, outputs, ok, error?}]}`; raises if no device is `ok`. Dynamic dims → 1, or 224 for H/W of rank-4 inputs; input = zeros; `ok` = all outputs finite | `models::install_job` (job `models.install`, manifests with `validation: "openvino-ir"`); result stored in `models.details` |
 | `tag_video` | `path` (proxy), `modelDir`, `everyMs` (default 2000; Rust sends `tagging::EVERY_MS` = 2000), `devices` (default `["GPU","CPU"]`; Rust does not send it) | `tagging.tag_video` output, §5 | `tagging::tag_job` (job `media.tag`, after `proxy::ensure_proxy`) |
+| `photo_render` | `path`, `edits`, `maxSide` (0 = full size), `out`, `quality` (default 92), `showMask`, `info` | `{width, height, outWidth, outHeight, ms, taken?}` | `photos::Lane` (import thumbnails, previews, export) — the photo worker process, not the job queue |
+| `photo_auto` | `path` | `{edits, skyShare}` | `lib::auto_photo` via `photos::Lane` |
 | `diagnostic.steps` | `steps` (default 10) | `{steps}`; 50 ms per step with progress + cancel | Tests only |
 | `diagnostic.crash` | — | `os._exit(3)` | Tests only |
 | `diagnostic.block` | `seconds` (default 30) | `{}` after one sleep that never checks cancel | Tests only |
@@ -160,6 +162,7 @@ Rust (`analysis::store`) keeps `version`, `quality`, and per scene `index`, `sta
 | Cache | `_compiled[(xml, device)]` keeps compiled models for the worker's lifetime |
 | Sampling | `duration_ms = frame_count / fps × 1000`; times `0, everyMs, 2·everyMs …` below the duration (at least t=0); seek with `CAP_PROP_POS_MSEC`; unreadable frames skipped; `check_cancel` every 10 samples; progress every sample |
 | Scoring | Image embedding L2-normalised; `logits = text_embeddings · v × logitScale`; softmax over **all** tags (content + negative) |
+| Camera cues (model v3) | For each `cues` entry of `openclip_tags.json` (`embedding` + `contrast`): `cue_score` = two-way softmax of the prompt against its contrast (float64, overflow-safe), 4 dp, per sample in `samples[].cues`. Cues: "view ahead" (v3: road and landscape ahead visible vs. camera tilted down at handlebars / ground); v4 adds "forest trail", "small bridge", "slope" (scene cues used by the Editing Core on trails). Kept out of the tag softmax so it is not diluted |
 | Top-k | `TOP_K` = 5 per sample, `[index, probability (4 dp)]`, best first |
 
 Output:
@@ -167,12 +170,23 @@ Output:
 ```json
 {"model": "ViT-B-32 laion2b_s34b_b79k", "device": "GPU", "fallbacks": [], "everyMs": 2000, "seconds": 12.3,
  "tags": [{"en": "beach", "vi": "bãi biển", "negative": false}],
- "samples": [{"atMs": 0, "tags": [[0, 0.4123], [1, 0.2011]]}]}
+ "cues": [{"en": "view ahead", "vi": "thấy đường phía trước"}],
+ "samples": [{"atMs": 0, "tags": [[0, 0.4123], [1, 0.2011]], "cues": [0.9731]}]}
 ```
 
-Rust (`tagging::store`) keeps `device`, `tags`, `samples` (see [DATABASE.md](DATABASE.md) `media_tags`).
+Rust (`tagging::store`) keeps `device`, `tags`, `cues`, `samples` (see [DATABASE.md](DATABASE.md) `media_tags`).
 
-Self-check: `python tagging.py` — preprocess output shape/dtype for 540×960, 960×540 and 100×100 inputs, and the normalised value of a white pixel. Does not load a model.
+Self-check: `python tagging.py` — preprocess output shape/dtype for 540×960, 960×540 and 100×100 inputs, the normalised value of a white pixel, and `cue_score` on unit vectors. Does not load a model.
+
+## 5a. photo.py — photo editor (ADR 0006, slice B1)
+
+Classical, deterministic, no model; the original is only read (`np.fromfile` + `cv2.imdecode`, EXIF orientation applied; Unicode paths work). Edit values −100..100, unknown keys ignored, radii scaled from a 1600 px reference so previews match full-size exports. Last two decodes cached for live previews.
+
+Order of operations (`render`): geometry (rotate 90° steps, straighten with zoom so no corners show, centred aspect crop) → denoise (guided filter on luma, strong on chroma) → white balance (temperature / tint gains, luminance kept) → exposure (±2 stops in linear light) → dehaze (dark-channel prior + guided filter; negative adds haze) → highlight roll-off above 0.85 (no burnt skies) → Lab tone (only when a tone/colour slider is set): shadows / highlights weighted by a guided-filter local brightness, blacks / whites end points, S-curve contrast, clarity (bounded `tanh` detail, no halos), edge-masked unsharp mask (flat / noisy areas not sharpened), saturation and vibrance (skin hues protected) → HSL per 8 bands → **sky** → look (`none, warm, cool, vivid, cinematic, bw, vintage`) → vignette → optional sky-mask overlay.
+
+**Sky** (owner 2026-11-12: enhance the photo's own sky, cinematic but natural, never paste one): `sky_mask` at 512 px — sky-like = bright, not foliage (green hues), and smooth or blue or cloud-white; kept only as an unbroken run from the top of each column starting in the top 10 %; narrow downward spikes (trunks, white shirts) cut to the running median skyline; guided-filter soft edge limited to the dilated hard mask. `enhance_sky`: cloud texture (bounded local contrast), slightly deeper bright sky, chroma × 1.35, optional warmth — blended by the mask × strength. Thresholds are initial values checked on stills from the owner's footage (frame boards); a click selection comes with slice B2.
+
+`auto(path)`: exposure towards a mid-grey median (70 %, ±60), white balance from near-neutral pixels only at half strength, contrast for flat photos, highlights −25 / shadows +20 when clipped, clarity 10, vibrance 15, sharpen 20, sky 35 when the sky covers > 8 %. `taken(path)`: minimal EXIF reader (DateTimeOriginal). Self-check `python photo.py` (neutral stack, exposure, white balance, sky mask on a synthetic scene, edge-only sharpening, geometry, looks, extremes, Unicode file names, auto, no-EXIF date).
 
 ## 6. tools/clip-export (dev-only)
 

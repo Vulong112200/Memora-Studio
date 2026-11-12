@@ -2,7 +2,7 @@
 
 SQLite schema, migrations, backups, and which Rust code reads and writes each table and JSON column.
 
-Last verified: 2026-11-08 against commit `b751673`. Index: [README.md](README.md). Kept current by the `sync-docs` skill ([.claude/skills/sync-docs](../../.claude/skills/sync-docs/SKILL.md)).
+Last verified: 2026-11-11 against commit `9ac182c` + uncommitted changes. Index: [README.md](README.md). Kept current by the `sync-docs` skill ([.claude/skills/sync-docs](../../.claude/skills/sync-docs/SKILL.md)).
 
 Sources: [db.rs](../../apps/desktop/src-tauri/src/db.rs), plus every module that runs SQL:
 [projects.rs](../../apps/desktop/src-tauri/src/projects.rs), [media.rs](../../apps/desktop/src-tauri/src/media.rs),
@@ -73,6 +73,7 @@ Sources: [db.rs](../../apps/desktop/src-tauri/src/db.rs), plus every module that
 | 7 | Table `media_tags` (PK media_id, `tags_json`) | OpenCLIP observations |
 | 8 | Tables `media_marks` (PK media_id, `favorite`, `excluded`) and `editing_plans` (PK project_id, `style`, `plan_json`) | Editing Core |
 | 9 | Column `project_clips.caption TEXT`; table `project_settings` (PK project_id, `export_json`) | Per-clip captions, per-project export options |
+| 10 | Table `photos` (path `UNIQUE COLLATE NOCASE`, size, mtime, width, height, `taken_at`, `edits_json`, `imported_at`) | Photo editor (ADR 0006); edit stack in the same row |
 
 ## 3. Tables
 
@@ -213,10 +214,11 @@ All timestamps are TEXT, RFC 3339 UTC with milliseconds, default `now`.
 ```json
 {"device": "GPU",
  "tags": [{"en": "beach", "vi": "bãi biển", "negative": false}, …],
- "samples": [{"atMs": 0, "tags": [[0, 0.4123], [1, 0.2011]]}]}
+ "cues": [{"en": "view ahead", "vi": "thấy đường phía trước", "negative": false}],
+ "samples": [{"atMs": 0, "tags": [[0, 0.4123], [1, 0.2011]], "cues": [0.9731]}]}
 ```
 
-`samples[].tags` = `[index into tags, probability]`, best first (top 5 from the worker, sampled every `EVERY_MS` = 2000 ms). The taxonomy is stored per row, so rows tagged with different taxonomy versions stay readable.
+`samples[].tags` = `[index into tags, probability]`, best first (top 5 from the worker, sampled every `EVERY_MS` = 2000 ms). `cues` / `samples[].cues` (model v3+, default empty for older rows; v4: view ahead, forest trail, small bridge, slope): camera-cue probabilities in the order of `cues` (`tagging::cue` averages them over a window). The taxonomy is stored per row, so rows tagged with different taxonomy versions stay readable.
 
 - **W**: `tagging::store` (upsert; ← `tagging::tag_job`, job `media.tag`), `tagging::clear` (← `media::import_one` when the file changed).
 - **R**: `tagging::get` (`lib::list_scenes`, `lib::recommend_for`, `editing::gather`, `cli`), `tagging::all` (`lib::list_media`, `lib::vocabulary` for the request box, `cli::status`, `cli` concepts/media). Summaries (`tagging::summarize`) are computed on read.
@@ -251,10 +253,11 @@ All timestamps are TEXT, RFC 3339 UTC with milliseconds, default `now`.
  "clips": [{"mediaId": 3, "sceneIndex": 2, "inMs": 4000, "outMs": 8500,
             "scores": {"technical": 0.8, "semantic": 0.6, "speech": 0.0, "favorite": 0.0},
             "rank": 0.71, "tags": ["biển"], "reasons": ["…"]}],
- "skipped": ["…"], "candidates": 42, "suggestedTitle": "Biển · 2026-10-01"}
+ "skipped": ["…"], "candidates": 42, "suggestedTitle": "Biển · 2026-10-01",
+ "notes": ["length 4:58 chosen from 70 min of footage …"]}
 ```
 
-`wishes` (`editing::Wishes`, every field defaults when missing; `wishes` and `suggestedTitle` default too, so older plans still load):
+`wishes` (`editing::Wishes`, every field defaults when missing; `wishes`, `suggestedTitle` and `notes` default too, so older plans still load):
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -304,6 +307,23 @@ All timestamps are TEXT, RFC 3339 UTC with milliseconds, default `now`.
 - Defaults when no row: `export::Options::default()`.
 - **W**: `export::save_options` (runs `Options::check` first; `lib::set_export_options`, `lib::apply_plan_to`, `cli "options"` when flags are given).
 - **R**: `export::load_options` (`lib::get_export_options`, `lib::apply_plan_to`, `cli "options"`, `cli "export"`, `cli::show_timeline`). The export job itself takes `options` from its job params, not from this table.
+
+### photos (migration 10)
+
+| Column | Type | Constraints | Meaning |
+|---|---|---|---|
+| id | INTEGER | PK | |
+| path | TEXT | NOT NULL, UNIQUE, COLLATE NOCASE | Original photo, read in place, never written |
+| size | INTEGER | NOT NULL | Bytes at import |
+| modified_unix | INTEGER | | File modified time at import |
+| width, height | INTEGER | | Displayed size (EXIF orientation applied), set after the thumbnail render |
+| taken_at | TEXT | | EXIF DateTimeOriginal `YYYY-MM-DDTHH:MM:SS` (camera local time), else file time `…Z` |
+| edits_json | TEXT | | Edit stack (object) or NULL; keys of `photo.py` (`exposure`, `contrast`, `highlights`, `shadows`, `whites`, `blacks`, `temperature`, `tint`, `vibrance`, `saturation`, `clarity`, `dehaze`, `sharpen`, `denoise`, `sky`, `skyWarmth`, `vignette`, `straighten` = numbers −100..100 (straighten ±15°), `rotate` 0/90/180/270, `crop` `free|1:1|4:5|3:2|16:9|9:16`, `look` = one of `photo.LOOKS`, `hsl` = `{band: [hue, sat, light]}`) |
+| imported_at | TEXT | NOT NULL, default now | |
+
+- **W**: `photos::upsert` / `set_info` (← `photos::import`, `lib::import_photos`), `photos::set_edits` (`lib::set_photo_edits`), `photos::remove` (`lib::remove_photo`).
+- **R**: `photos::list` (`lib::list_photos`), `photos::get` (preview, auto, export commands).
+- No foreign keys; no other table refers to photos.
 
 ## 4. Invalidation and cascades
 

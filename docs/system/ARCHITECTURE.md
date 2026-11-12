@@ -81,6 +81,7 @@ ASUS Zenbook 14 UX3405CA · Core Ultra 9 285H (16 threads) · Arc 140T (128 MB d
 | [0003](../adr/0003-classical-analysis.md) | Analysis on the 540p proxy in one OpenCV pass; observations stored, scores computed in Rust |
 | [0004](../adr/0004-local-ai-and-editing-core.md) | whisper.cpp + VAD + loop filter; OpenCLIP fixed bilingual taxonomy; deterministic Editing Core; export looks |
 | [0005](../adr/0005-free-music-library.md) | Free music library: verified catalog, download on export, delete after, credit burned in |
+| [0006](../adr/0006-photo-editor.md) | Photo editor: `photos` table with the edit stack, classical tools in `photo.py` (B1 done, incl. natural sky enhancement), second worker process for previews; local AI by approved slices (B2–B6) |
 | PROGRESS 2026-11-08 | Reliability batch (audit R2–R6); per-concept caps; `memora-cli`; offline request box instead of a Claude API call |
 
 ## 8. Approval gates

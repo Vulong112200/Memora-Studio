@@ -1,6 +1,7 @@
 //! Free music library (owner request 2026-11-08): a curated catalog (sounds.json) of verified tracks —
-//! source, licence, credit, size and SHA-256 recorded at development time. A track is downloaded only for
-//! an export that uses it, verified, rendered, then deleted. The user's own audio files are never touched.
+//! source, licence, credit, size and SHA-256 recorded at development time. A track is downloaded the first
+//! time an export uses it and kept in `<data root>\music\` (verified on every use). The user's own audio
+//! files are never touched.
 
 use crate::models::{Step, download, sha256_file};
 use crate::process::JobObject;
@@ -52,6 +53,7 @@ fn style_moods(style: &str) -> &'static [&'static str] {
         "social_story" => &["upbeat", "happy", "playful"],
         "memory_nostalgia" => &["nostalgic", "emotional", "warm", "gentle", "calm"],
         "travel_documentary" => &["calm", "chill", "adventure", "light", "folk"],
+        "journey_recap" => &["gentle", "calm", "uplifting", "warm", "folk"],
         _ => &["calm", "chill", "light", "ambient"],
     }
 }
@@ -116,21 +118,32 @@ pub fn recommend(style: &str, tags: &[(String, f64)], video_ms: i64, speech_shar
     out
 }
 
-/// Downloads `t` to a unique file in `dir`, verifies size + SHA-256, and returns its path. The caller
-/// deletes it after rendering (see `TempFile`). Never writes outside `dir`.
-pub fn fetch(t: &Track, dir: &Path, job_object: &JobObject, progress: &dyn Fn(f64), cancelled: &dyn Fn() -> bool) -> Result<TempFile, String> {
+/// Returns `<dir>\<id>.mp3`, downloading it once (owner decision 2026-11-08: keep library music, up to 2 GB,
+/// so exports work offline and the artists' servers are not hit on every export). Size + SHA-256 are checked
+/// on every use; a file that fails is deleted and downloaded again. Never writes outside `dir`.
+pub fn fetch(t: &Track, dir: &Path, job_object: &JobObject, progress: &dyn Fn(f64), cancelled: &dyn Fn() -> bool) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let file = TempFile(dir.join(format!("{}-{}-{nanos}.mp3", t.id, std::process::id())));
-    match download(&t.url, &file.0, job_object, &|b| progress(b as f64 / t.size_bytes.max(1) as f64), cancelled) {
+    let file = dir.join(format!("{}.mp3", t.id));
+    let verified = |cancelled: &dyn Fn() -> bool| -> Result<bool, String> {
+        let size = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+        if size != t.size_bytes {
+            return Ok(false);
+        }
+        Ok(sha256_file(&file, cancelled, &|_| {})?.ok_or("cancelled")?.eq_ignore_ascii_case(&t.sha256))
+    };
+    if verified(cancelled)? {
+        progress(1.0);
+        return Ok(file);
+    }
+    let _ = std::fs::remove_file(&file);
+    match download(&t.url, &file, job_object, &|b| progress(b as f64 / t.size_bytes.max(1) as f64), cancelled) {
         Ok(()) => {}
         Err(Step::Cancelled) => return Err("cancelled".into()),
-        Err(Step::Failed(_, e)) => return Err(format!("Cannot download \"{}\" (internet needed for library music): {e}", t.title)),
+        Err(Step::Failed(_, e)) => return Err(format!("Cannot download \"{}\" (internet needed the first time): {e}", t.title)),
     }
-    let size = std::fs::metadata(&file.0).map(|m| m.len()).unwrap_or(0);
-    let hash = sha256_file(&file.0, cancelled, &|_| {})?.ok_or("cancelled")?;
-    if size != t.size_bytes || !hash.eq_ignore_ascii_case(&t.sha256) {
-        return Err(format!("\"{}\" failed verification (size {size}, SHA-256 {hash}); not used.", t.title));
+    if !verified(cancelled)? {
+        let _ = std::fs::remove_file(&file);
+        return Err(format!("\"{}\" failed verification (size or SHA-256 differs from the catalog); not used.", t.title));
     }
     Ok(file)
 }
@@ -152,16 +165,20 @@ mod tests {
     #[test]
     fn catalog_is_complete_and_verified() {
         let c = catalog();
-        assert_eq!(c.len(), 22);
+        assert_eq!(c.len(), 32);
+        // Official artist sites only (verified 2026-11-08: file link and CC BY 4.0 on each track page).
+        const SOURCES: [&str; 2] =
+            ["https://incompetech.com/music/royalty-free/mp3-royaltyfree/", "https://www.scottbuckley.com.au/library/wp-content/uploads/"];
         for t in &c {
-            assert!(t.url.starts_with("https://incompetech.com/music/royalty-free/mp3-royaltyfree/"), "{}", t.url);
+            assert!(SOURCES.iter().any(|s| t.url.starts_with(s)), "{}", t.url);
             assert!(t.sha256.len() == 64 && t.size_bytes > 0 && t.duration_ms > 30_000, "{}", t.id);
-            assert!(t.credit.contains(&t.title) && t.credit.contains("By Attribution 4.0"));
+            assert!(t.license == "CC BY 4.0" && t.credit.contains(&t.title) && (t.credit.contains("By Attribution 4.0") || t.credit.contains("CC-BY 4.0")));
             assert!(["low", "medium", "high"].contains(&t.energy.as_str()) && !t.moods.is_empty());
         }
         let mut ids: Vec<_> = c.iter().map(|t| &t.id).collect();
+        ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), 22, "unique ids");
+        assert_eq!(ids.len(), 32, "unique ids");
     }
 
     #[test]
@@ -186,17 +203,34 @@ mod tests {
         assert!(!p.exists());
     }
 
-    /// Real download of the smallest track (internet), verify, delete. Skipped offline.
+    /// Kept file: verified and reused without a download; a damaged one is replaced (needs no network to fail cleanly).
+    #[test]
+    fn kept_track_is_reused_and_a_damaged_one_is_not() {
+        let dir = std::env::temp_dir().join(format!("memora-sound-keep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = b"not really an mp3";
+        let mut t = catalog().remove(0);
+        t.size_bytes = body.len() as u64;
+        t.sha256 = "8a1d3dbf6c64d5d74fb4d7e5c0d5bbb3a8c8ff3cba1ef0f55e5e7b3c3f9a4d21".into(); // wrong on purpose first
+        t.url = "file:///nonexistent/never.mp3".into();
+        std::fs::write(dir.join(format!("{}.mp3", t.id)), body).unwrap();
+        let jo = JobObject::new().unwrap();
+        assert!(fetch(&t, &dir, &jo, &|_| {}, &|| false).is_err(), "checksum mismatch → re-download → fails offline");
+        assert!(!dir.join(format!("{}.mp3", t.id)).exists(), "damaged file removed");
+        std::fs::write(dir.join(format!("{}.mp3", t.id)), body).unwrap();
+        t.sha256 = sha256_file(&dir.join(format!("{}.mp3", t.id)), &|| false, &|_| {}).unwrap().unwrap();
+        assert_eq!(fetch(&t, &dir, &jo, &|_| {}, &|| false).unwrap(), dir.join(format!("{}.mp3", t.id)), "verified copy reused, no download");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Real download of the smallest track (internet), verified and kept. Skipped offline.
     #[test]
     #[ignore]
     fn fetch_real_track() {
         let t = catalog().into_iter().min_by_key(|t| t.size_bytes).unwrap();
         let dir = std::env::temp_dir().join(format!("memora-sound-fetch-{}", std::process::id()));
         let f = fetch(&t, &dir, &JobObject::new().unwrap(), &|_| {}, &|| false).unwrap();
-        assert!(f.0.exists());
-        let path = f.0.clone();
-        drop(f);
-        assert!(!path.exists(), "deleted after use");
+        assert!(f.exists(), "kept after use");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -69,6 +69,45 @@ See `docs/MODEL_PROPOSAL.md` §4: whisper.cpp b5454 runtime installed in `<data 
 - Verified (request box): 82 Rust tests; on the copy, the owner-style sentence → social_story 30 s vertical, big tree as hook, path walk kept, cycling one 2 s clip ("less wanted"), 21 selfie windows left out, warm look, calm library track, title "Đà Lạt"; release build.
 - Verified: 76 Rust tests; on a COPY of the data folder: `plan 1 --style travel_cinematic --target 45 --prefer "đường mòn,cây cổ thụ,thuyền"` → 6 clips incl. the path walk and the big tree, `apply`, `options --color warm --title …`, `export` → valid 1920×1080 39.9 s file (hybrid-qsv, 48 s render); release build of app + CLI.
 
+#### Nam Cát Tiên trip edit + fixes from using the app (2026-11-08, owner request)
+- Library: 25 DJI Osmo Action 4 clips of 20/02/2026 (≈72 min) analysed (13 min), tagged on GPU (9 min) and transcribed with whisper-base vi (2.5 min) through `memora-cli job`.
+- Outputs (from the originals): project #4 "Nam Cát Tiên – tổng hợp" (`journey_recap`, 26 clips, 3:20, 1920×1080, Blue Feather, own sound 0.35, −16.1 LUFS) and project #5 "Nam Cát Tiên – Reels" (13 hand-picked clips, 33.5 s, 1080×1920 centre crop, Achaidh Cheide, own sound off, −16.3 LUFS). Both validated; frames inspected. ★ on #1, #3, #10, #12, #16 for the year recap.
+- App changes: `journey_recap` style + request words; own sound lowered to 0.35 under music (measured DJI level would keep the music ducked); Editing Core ignores Whisper lines with implausible timing (`transcribe::Segment::timing_plausible`); export renders timelines over 10 clips in parts (`render_parts`, FFmpeg peak 11 GB → 5.2 GB on the 26-clip recap); CLI `mark`.
+- Findings still open (tagging misses some fingers, no visual-appeal score, centre crop, large files): `docs/IMPROVEMENT_AUDIT.md` "Found while editing Nam Cát Tiên".
+- Verified: 84 Rust tests (new: journey order, stretched Whisper lines, own sound under music, render in parts with real FFmpeg); release build of app + CLI.
+
+#### Owner review round 2 of the Nam Cát Tiên edit (2026-11-09): recap 7/10, reel 7/10
+- Owner: library music poor ("thà không có nhạc"), reel music "như cướp biển", riding highlights missing, raised-camera road shots replaced by tilted-down handlebar shots, reel did not cover the trip; allowed 2 GB for better free music.
+- Camera cue: OpenCLIP model v3 (same IR, `cues` with "view ahead" prompt pair; checked on 850 frames), exported with the existing dev venv, installed with `memora-cli job models.install`, library re-tagged (4 min on GPU). Editing Core leaves out tilted-down windows and ranks by the view; same-concept diversity penalty capped at 3; request aliases (đạp xe → bicycle); own sound back to 1.0 without music.
+- Music: 10 Scott Buckley tracks (CC BY 4.0; track pages checked, files measured) added to `sounds.json`; library music kept in `<data root>\music\` (ADR 0005 amendment); CSP allows their previews; UI text updated.
+- Outputs: recap `projects\4\exports\…-1794157312.mp4` (32 clips, 3:23, no music, own sound, −16.4 LUFS) and reel `projects\5\exports\…-1794157516.mp4` (18 clips, 46 s, "Simplicity", −16.0 LUFS); frames of both outputs inspected; 7 of 22 automatic reel clips replaced by hand (visual appeal still not measured, audit T7).
+- Verified: 86 Rust tests, `python tagging.py`, `tsc --noEmit`, release build.
+
+#### Owner review 3 of the Nam Cát Tiên recap (2026-11-11): forest trails, length, transitions
+- Owner: no forest paths / uphill / small bridges / downhill through the leaves; 3 min too short (~5 min or what the footage needs); smoother transitions.
+- Cause (real database, read-only): the v3 "view ahead" cue scored 1 362 of 1 566 riding samples < 0.1 (handlebars always in frame, no "landscape far ahead" under the canopy) → 466 windows left out; the 240 s plan ran out of candidates at 213 s.
+- OpenCLIP model **v4** (same IR, `openclip_tags.json` only; dev venv, IR vs PyTorch cosine ≥ 0.99999): scene cues "forest trail", "small bridge", "slope", thresholds from frame boards of 1 010 frames ("leaf-covered path" / "ground only" prompts did not separate, left out). Installed with `memora-cli job models.install`, 25 files re-tagged (7.4 min, GPU).
+- Editing Core: tilted windows kept on forest trails, bridge / slope / forest trail become the clip's concept; `journey_recap` length from the footage (4.2 s per minute, 90–360 s) with a plan note; coverage pass (one clip per scene type with ≥ 20 s, one per 8 min of recording time); request words "đường rừng", "qua cầu", "lên/xuống dốc".
+- Export: per-join transitions, each clamped by its two neighbours (audit E4 fixed); new `auto` transition (default of `journey_recap`): short cross dissolve inside a shot, 0.7 s between places, dip to black ≥ 20 min apart. Found: xfade `dissolve` is the grainy one — `auto` uses `fade`.
+- Output: project #4 `projects\4\exports\Nam Cát Tiên – tổng hợp-landscape-1794413683.mp4` (41 clips, 4:30 of a 4:58 auto target, 13 forest trail + 3 slope + 1 bridge clips, valid, 1.9 GB); frame board inspected (the one "bridge" clip shows people by the stream: cue false positive).
+- Verified: 89 Rust tests (new: auto joins / per-join clamp, forest trails + coverage + auto length, request words), real export validated.
+
+#### UI / UX rework (2026-11-11, owner: "not clear what to do next")
+- Sidebar with Library / Projects / Jobs / Settings, "Next step" banner (add videos → analyse → project → Smart edit → edit & export), job bar on every page, project as three steps (Videos → Smart edit → Edit & export), confirm before a plan replaces a timeline, copy path of an export.
+- One "Analyse" for everything Smart edit uses (scenes, then OpenCLIP tags, then Whisper — small when installed), also run automatically after importing; models missing → link to Settings.
+- Bilingual UI (owner decision): Vietnamese default, English in the sidebar; `L(en, vi)` at each string (`i18n.ts`); shared pieces in `ui.tsx`. Backend texts (style descriptions, plan reasons, "Understood" chips, errors) still English/mixed.
+- Verified: `tsc --noEmit`, release build, app window screenshots (Library, Projects step 2 and step 3 on the real library); no frontend unit tests.
+
+#### Photo editor slice B1 (2026-11-12, owner: "thực hiện tiếp … chỉnh ảnh") — ADR 0006, no model, awaiting review
+- Owner clarification: "sky" = make the photo's own sky cinematic, clearer, richer but natural — never a pasted sky; reference images are mood only.
+- Worker `photo.py` (OpenCV + numpy, already installed): geometry (rotate, straighten, aspect crop), denoise, white balance, exposure, dehaze, highlight roll-off, shadows / highlights / whites / blacks, contrast, clarity (no halos), edge-only sharpening, vibrance (skin protected) / saturation, HSL × 8 bands, looks, vignette; **sky**: classical mask (sky-like pixels in an unbroken run from the top of each column, narrow spikes cut to the median skyline) + cloud detail, deeper bright sky, richer colour, warmth; **Auto** suggestions; minimal EXIF date reader. Self-check `python photo.py`.
+- Mask tuned on frame boards of 6 stills from the owner's footage: first version leaked into trees, water and people; column-run + skyline-median version keeps to the sky (trunks / shirts no longer taken). Speed on this PC: 2688×1512 full render 1.2–1.4 s, 1600 px preview 0.45 s with Auto values (single runs).
+- Rust `photos.rs` (migration 10 `photos`, edit stack in the row), second worker process `photos::Lane` for previews, 7 commands (`list_photos`, `import_photos`, `set_photo_edits`, `preview_photo`, `auto_photo`, `export_photo`, `remove_photo`); exports `photos\exports\<name>-edit[-N].jpg`, never replacing a file. UI: new "Photos / Ảnh" page (strip of photos, large preview, slider panel, Auto, Undo, Reset, hold for original, show sky area, export).
+- Defaults while questions are open: exported photos do not carry the camera EXIF yet (Pillow in the worker venv needs approval); photos are added as files.
+- Test stills (frames of the owner's videos) in `E:\Memora Data\test-media\photos\` and imported in the library; one export `photos\exports\7_3-edit.jpg` (original hash unchanged).
+- Verified: 91 Rust tests (new: photo rows / edits / dates, real worker import → preview → auto → two exports), `python photo.py`, `tsc --noEmit`, release build, app window screenshots of the Photos page.
+- Next (needs approval of model downloads): B2 select + remove (MobileSAM, MI-GAN), B3 retouch (YuNet + landmarks), B4 bokeh (Depth Anything V2 Small, BiRefNet-lite), B6 AI upscale / denoise.
+
 ### Still open (owner decisions or later work)
 - Packaging / installer: needs the FFmpeg GPL licence review before any distribution and an embedded Python runtime (ADR 0002); not built.
 - Bundled music library (user's own files work now), subject-aware crop, text animation presets, GPS/location, month/year grouping in the library, Whisper GPU experiment.

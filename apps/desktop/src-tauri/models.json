@@ -2,7 +2,7 @@
   {
     "id": "openclip-vit-b32",
     "name": "OpenCLIP ViT-B/32",
-    "version": "2",
+    "version": "4",
     "category": "vision",
     "description": "Visual concepts and text search over scene frames (beach, food, city, people …).",
     "required": false,
@@ -28,8 +28,8 @@
         "file": "openclip_tags.json",
         "url": null,
         "revision": "laion/CLIP-ViT-B-32-laion2B-s34B-b79K@1a25a446712ba5ee05982a381eed697ef9b435cf, exported by tools/clip-export/export_openclip.py",
-        "sha256": "db2cb56c0dda7105e7b55b77f4367cdf40f42b1463a673de3042da7e7da31234",
-        "sizeBytes": 279986
+        "sha256": "039b1648ab9d82da3f09a6f749e4405ebdd3e7168c278288d0f2da55cf15eb4f",
+        "sizeBytes": 322909
       }
     ],
     "runtimes": [
@@ -42,7 +42,7 @@
         "validated": false
       }
     ],
-    "notes": "Image encoder as OpenVINO IR (FP16 weights, unchanged since v1) + precomputed text embeddings for a fixed bilingual tag list and 4 bad-shot detectors (finger over the lens, blurry, ground, too dark). Exported locally: install with \"Install from files\" from E:\\Memora Data\\downloads\\openclip-export-v2. IR vs PyTorch CPU: min cosine 0.9999988."
+    "notes": "Image encoder as OpenVINO IR (FP16 weights, unchanged since v1) + precomputed text embeddings for a fixed bilingual tag list, 4 bad-shot detectors (finger over the lens, blurry, ground, too dark) and, since v3, the camera cue \"view ahead\" (two-way softmax against \"looking down at handlebars and the ground\"). Exported locally: install with \"Install from files\" from E:\\Memora Data\\downloads\\openclip-export-v3. IR vs PyTorch CPU: min cosine 0.9999980."
   },
   {
     "id": "whisper-base",

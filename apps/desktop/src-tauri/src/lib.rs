@@ -8,6 +8,7 @@ mod jobs;
 mod logging;
 mod media;
 mod models;
+mod photos;
 mod process;
 mod projects;
 mod proxy;
@@ -53,6 +54,8 @@ struct AppState {
     worker_info: Arc<Mutex<Option<Value>>>,
     /// Open database, or the reason it is unavailable (no data root yet, open/migration failure).
     db: Db,
+    /// Worker process of the photo editor (previews do not wait behind queued jobs).
+    photo_lane: Arc<photos::Lane>,
     /// Log folder in use for this session (file logging starts at launch only).
     log_dir: Option<PathBuf>,
     _log_guard: Option<tracing_appender::non_blocking::WorkerGuard>,
@@ -251,7 +254,8 @@ fn interpret_request(text: String, state: State<'_, AppState>) -> Result<request
 fn vocabulary(c: &Connection) -> Result<Vec<tagging::TagName>, String> {
     let mut names: Vec<tagging::TagName> = vec![];
     for t in tagging::all(c)?.into_values() {
-        for n in t.tags {
+        // Scene cues (forest trail, small bridge, slope) can be asked for like tags; "view ahead" is framing only.
+        for n in t.tags.into_iter().chain(t.cues.into_iter().filter(|c| editing::SCENE_CUES.iter().any(|s| s.0 == c.en))) {
             if !names.iter().any(|x| x.en == n.en) {
                 names.push(n);
             }
@@ -403,6 +407,77 @@ fn move_clip(id: i64, delta: i64, state: State<'_, AppState>) -> Result<(), Stri
 }
 
 #[tauri::command]
+fn list_photos(state: State<'_, AppState>) -> Result<Vec<photos::Photo>, String> {
+    let mut items = with_db(&state, photos::list)?;
+    if let Some(cache) = cache_dir(&state) {
+        photos::attach_thumbs(&cache, &mut items);
+    }
+    Ok(items)
+}
+
+/// What a photo command running off the UI thread needs: database, photo worker, data root.
+fn photo_ctx(state: &AppState) -> Result<(Db, Arc<photos::Lane>, PathBuf), String> {
+    let root = state.settings.lock().unwrap().data_root.clone().ok_or(NO_DATA_ROOT)?;
+    Ok((state.db.clone(), state.photo_lane.clone(), root))
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
+}
+
+fn photo_of(db: &Db, id: i64) -> Result<photos::Photo, String> {
+    let guard = db.lock().unwrap();
+    photos::get(guard.as_ref().map_err(Clone::clone)?, id)
+}
+
+/// Adds photos (read in place, never modified): row, size, date, thumbnail.
+#[tauri::command]
+async fn import_photos(paths: Vec<String>, state: State<'_, AppState>) -> Result<photos::ImportResult, String> {
+    let (db, lane, root) = photo_ctx(&state)?;
+    let r = blocking(move || photos::import(&db, &lane, &root.join("cache"), &paths)).await?;
+    tracing::info!(imported = r.ids.len(), failed = r.failed.len(), "photos imported");
+    Ok(r)
+}
+
+#[tauri::command]
+fn set_photo_edits(id: i64, edits: Value, state: State<'_, AppState>) -> Result<(), String> {
+    with_db(&state, |c| photos::set_edits(c, id, &edits))
+}
+
+/// Live preview (≤ 1600 px) of `edits`, or the untouched photo with `before`; returns the cache file to show.
+#[tauri::command]
+async fn preview_photo(id: i64, edits: Value, show_mask: bool, before: bool, state: State<'_, AppState>) -> Result<PathBuf, String> {
+    let (db, lane, root) = photo_ctx(&state)?;
+    blocking(move || photos::preview(&lane, &root.join("cache"), &photo_of(&db, id)?, &edits, show_mask, before)).await
+}
+
+/// Suggested starting values for a photo (the UI puts them on the sliders; nothing is saved here).
+#[tauri::command]
+async fn auto_photo(id: i64, state: State<'_, AppState>) -> Result<Value, String> {
+    let (db, lane, _) = photo_ctx(&state)?;
+    blocking(move || {
+        let p = photo_of(&db, id)?;
+        lane.call("photo_auto", serde_json::json!({"path": p.path})).map(|r| r["edits"].clone())
+    })
+    .await
+}
+
+/// Full-size edited copy in `<data root>\photos\exports\`; the original is never written.
+#[tauri::command]
+async fn export_photo(id: i64, state: State<'_, AppState>) -> Result<PathBuf, String> {
+    let (db, lane, root) = photo_ctx(&state)?;
+    let out = blocking(move || photos::export(&lane, &root.join("photos").join("exports"), &photo_of(&db, id)?)).await?;
+    tracing::info!(photo_id = id, path = %out.display(), "photo exported");
+    Ok(out)
+}
+
+#[tauri::command]
+fn remove_photo(id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    let cache = cache_dir(&state).ok_or(NO_DATA_ROOT)?;
+    with_db(&state, |c| photos::remove(c, &cache, id))
+}
+
+#[tauri::command]
 fn submit_job(kind: String, params: Option<Value>, state: State<'_, AppState>) -> Result<jobs::Job, String> {
     if !UI_JOB_KINDS.contains(&kind.as_str()) {
         return Err(format!("Unknown job kind: {kind}"));
@@ -483,6 +558,8 @@ pub fn run() {
             let settings = Arc::new(Mutex::new(settings));
             let worker_info = Arc::new(Mutex::new(None));
             let runner = job_runner(settings.clone(), db.clone(), worker_info.clone())?;
+            let s = settings.clone();
+            let photo_lane = Arc::new(photos::Lane::new(move || s.lock().unwrap().data_root.clone())?);
             let handle = app.handle().clone();
             let jobs = jobs::JobManager::start(
                 runner,
@@ -497,6 +574,7 @@ pub fn run() {
                 jobs,
                 worker_info,
                 db,
+                photo_lane,
                 log_dir,
                 _log_guard: guard,
             });
@@ -535,7 +613,14 @@ pub fn run() {
             submit_job,
             list_jobs,
             cancel_job,
-            get_worker_info
+            get_worker_info,
+            list_photos,
+            import_photos,
+            set_photo_edits,
+            preview_photo,
+            auto_photo,
+            export_photo,
+            remove_photo
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

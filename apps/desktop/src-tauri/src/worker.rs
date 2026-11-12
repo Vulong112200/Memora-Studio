@@ -151,7 +151,7 @@ pub fn runner(
 }
 
 /// Returns the outcome and whether the worker is still usable.
-fn run_on(w: &mut Worker, job: &Job, progress: &dyn Fn(u64, u64), cancelled: &dyn Fn() -> bool) -> (Outcome, bool) {
+pub(crate) fn run_on(w: &mut Worker, job: &Job, progress: &dyn Fn(u64, u64), cancelled: &dyn Fn() -> bool) -> (Outcome, bool) {
     let id = job.id.to_string();
     let start = json!({"type": "job.start", "id": id, "kind": job.kind, "params": job.params});
     if let Err(e) = w.send(&start) {

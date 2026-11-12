@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { createProject, deleteProject, listProjects, renameProject, type Project } from "./api";
+import { dateTime, L } from "./i18n";
+import { btn, Card, field } from "./ui";
 
-const inputClass = "rounded-md border border-zinc-300 bg-transparent px-3 py-1.5 text-sm dark:border-zinc-700";
-const linkClass = "text-xs text-zinc-500 hover:underline";
+const inputClass = `${field} px-3`;
+const linkClass = btn.link;
 
 function ProjectRow({ project, active, onOpen, onChanged, onError }: {
   project: Project;
@@ -26,37 +28,37 @@ function ProjectRow({ project, active, onOpen, onChanged, onError }: {
           autoFocus
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => e.key === "Escape" && setEditing(false)}
-          aria-label="Project name"
+          aria-label={L("Project name", "Tên dự án")}
         />
         <button className={linkClass} onClick={() => run(renameProject(project.id, name)).then(() => setEditing(false))}>
-          Save
+          {L("Save", "Lưu")}
         </button>
         <button className={linkClass} onClick={() => { setName(project.name); setEditing(false); }}>
-          Cancel
+          {L("Cancel", "Huỷ")}
         </button>
       </li>
     );
   }
 
   return (
-    <li className="flex items-center gap-3 py-2">
+    <li className={`flex items-center gap-3 rounded-lg px-2 py-2 ${active ? "bg-indigo-50 dark:bg-indigo-950/40" : ""}`}>
       <div className="flex-1">
-        <p className="text-sm font-medium">{project.name}{active && <span className="ml-2 text-xs text-green-600">open</span>}</p>
-        <p className="text-xs text-zinc-500">Updated {new Date(project.updatedAt).toLocaleString()}</p>
+        <p className="text-sm font-medium">{project.name}{active && <span className="ml-2 text-xs text-indigo-600">{L("open", "đang mở")}</span>}</p>
+        <p className="text-xs text-zinc-500">{L("Updated", "Cập nhật")} {dateTime(new Date(project.updatedAt))}</p>
       </div>
       {confirming ? (
         <>
-          <span className="text-xs text-zinc-500">Delete project? Original videos are not affected.</span>
+          <span className="text-xs text-zinc-500">{L("Delete project? Original videos are not affected.", "Xoá dự án? Video gốc không bị ảnh hưởng.")}</span>
           <button className="text-xs text-red-600 hover:underline" onClick={() => run(deleteProject(project.id))}>
-            Delete
+            {L("Delete", "Xoá")}
           </button>
-          <button className={linkClass} onClick={() => setConfirming(false)}>Keep</button>
+          <button className={linkClass} onClick={() => setConfirming(false)}>{L("Keep", "Giữ")}</button>
         </>
       ) : (
         <>
-          {!active && <button className={linkClass} onClick={onOpen}>Open</button>}
-          <button className={linkClass} onClick={() => setEditing(true)}>Rename</button>
-          <button className={linkClass} onClick={() => setConfirming(true)}>Delete</button>
+          {!active && <button className={btn.secondary} onClick={onOpen}>{L("Open", "Mở")}</button>}
+          <button className={linkClass} onClick={() => setEditing(true)}>{L("Rename", "Đổi tên")}</button>
+          <button className={linkClass} onClick={() => setConfirming(true)}>{L("Delete", "Xoá")}</button>
         </>
       )}
     </li>
@@ -94,25 +96,19 @@ export default function Projects({ active, onOpen }: { active: Project | null; o
   }
 
   return (
-    <section className="rounded-xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500">Projects</h2>
+    <Card title={L("Projects", "Dự án")}>
       <form className="flex gap-2" onSubmit={create}>
         <input
           className={`${inputClass} flex-1`}
-          placeholder="New project name, e.g. Đà Lạt 2026"
+          placeholder={L("New project name, e.g. Đà Lạt 2026", "Tên dự án mới, ví dụ Đà Lạt 2026")}
           value={name}
           onChange={(e) => setName(e.target.value)}
-          aria-label="New project name"
+          aria-label={L("New project name", "Tên dự án mới")}
         />
-        <button
-          className="rounded-md bg-zinc-900 px-4 py-1.5 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
-          disabled={name.trim() === ""}
-        >
-          Create
-        </button>
+        <button className={btn.primary} disabled={name.trim() === ""}>{L("Create", "Tạo")}</button>
       </form>
       {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
-      {projects?.length === 0 && <p className="mt-3 text-sm text-zinc-500">No projects yet.</p>}
+      {projects?.length === 0 && <p className="mt-3 text-sm text-zinc-500">{L("No projects yet. A project is one video you want to make (a trip recap, a reel…).", "Chưa có dự án. Mỗi dự án là một video bạn muốn làm (tổng hợp chuyến đi, reels…).")}</p>}
       <ul className="mt-2 divide-y divide-zinc-200 dark:divide-zinc-800">
         {projects?.map((p) => (
           <ProjectRow
@@ -125,6 +121,6 @@ export default function Projects({ active, onOpen }: { active: Project | null; o
           />
         ))}
       </ul>
-    </section>
+    </Card>
   );
 }

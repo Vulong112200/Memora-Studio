@@ -371,5 +371,190 @@
   "license": "CC BY 4.0",
   "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
   "credit": "\"Investigations\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0"
+ },
+ {
+  "id": "home-was-you",
+  "title": "Home Was You",
+  "artist": "Scott Buckley",
+  "moods": [
+   "warm",
+   "gentle",
+   "nostalgic",
+   "folk"
+  ],
+  "energy": "low",
+  "durationMs": 269400,
+  "url": "https://www.scottbuckley.com.au/library/wp-content/uploads/2026/07/HomeWasYou.mp3",
+  "sha256": "4d4cf96e941c61cbdab71ef49c6dd6b67d6fd1df00926fac2f6e419e34d76d61",
+  "sizeBytes": 10779404,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "'Home Was You' by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au"
+ },
+ {
+  "id": "amberlight",
+  "title": "Amberlight",
+  "artist": "Scott Buckley",
+  "moods": [
+   "warm",
+   "gentle",
+   "nostalgic",
+   "cinematic"
+  ],
+  "energy": "low",
+  "durationMs": 282905,
+  "url": "https://www.scottbuckley.com.au/library/wp-content/uploads/2025/03/Amberlight.mp3",
+  "sha256": "3cce8ecd622a870c833b3688658b10f8ebab4f621e7953b57f6d69e6e4bcf023",
+  "sizeBytes": 11319612,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "'Amberlight' by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au"
+ },
+ {
+  "id": "golden-hour",
+  "title": "Golden Hour",
+  "artist": "Scott Buckley",
+  "moods": [
+   "warm",
+   "uplifting",
+   "calm",
+   "cinematic"
+  ],
+  "energy": "medium",
+  "durationMs": 324296,
+  "url": "https://www.scottbuckley.com.au/library/wp-content/uploads/2023/02/GoldenHour.mp3",
+  "sha256": "fc46696027b2f55a2948e1a24176ff7562d9f99c85e9223ef65b80473d54f5fe",
+  "sizeBytes": 12975778,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "'Golden Hour' by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au"
+ },
+ {
+  "id": "cicadas",
+  "title": "Cicadas",
+  "artist": "Scott Buckley",
+  "moods": [
+   "calm",
+   "ambient",
+   "gentle",
+   "nature"
+  ],
+  "energy": "low",
+  "durationMs": 393215,
+  "url": "https://www.scottbuckley.com.au/library/wp-content/uploads/2023/12/Cicadas.mp3",
+  "sha256": "6260cfd4c5bd02b6d124233957ae5ac0f575e2d36fc5f20e939e1727e0cb4c35",
+  "sizeBytes": 15732208,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "'Cicadas' by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au"
+ },
+ {
+  "id": "wildflowers",
+  "title": "Wildflowers",
+  "artist": "Scott Buckley",
+  "moods": [
+   "gentle",
+   "uplifting",
+   "cinematic"
+  ],
+  "energy": "medium",
+  "durationMs": 322168,
+  "url": "https://www.scottbuckley.com.au/library/wp-content/uploads/2025/12/Wildflowers.mp3",
+  "sha256": "8beb04451d69523608d1f2f45eb228b6b752534091afc22a889c512c5e88834a",
+  "sizeBytes": 12891141,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "'Wildflowers' by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au"
+ },
+ {
+  "id": "meanwhile",
+  "title": "Meanwhile",
+  "artist": "Scott Buckley",
+  "moods": [
+   "dreamy",
+   "gentle",
+   "nostalgic"
+  ],
+  "energy": "low",
+  "durationMs": 325829,
+  "url": "https://www.scottbuckley.com.au/library/wp-content/uploads/2025/01/Meanwhile.mp3",
+  "sha256": "39fd49bfb138bcee806fb99d8f2c9b7bf89fc72bb7b730125ef20f0c6b2635b7",
+  "sizeBytes": 13036146,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "'Meanwhile' by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au"
+ },
+ {
+  "id": "life-in-motion",
+  "title": "Life in Motion",
+  "artist": "Scott Buckley",
+  "moods": [
+   "uplifting",
+   "calm",
+   "cinematic"
+  ],
+  "energy": "medium",
+  "durationMs": 381417,
+  "url": "https://www.scottbuckley.com.au/library/wp-content/uploads/2024/03/LifeInMotion.mp3",
+  "sha256": "e72d716034afe99b9653670f1b695b3ffec9f9d25945cdd60186ac6d35216beb",
+  "sizeBytes": 15260979,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "'Life in Motion' by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au"
+ },
+ {
+  "id": "simplicity",
+  "title": "Simplicity",
+  "artist": "Scott Buckley",
+  "moods": [
+   "upbeat",
+   "happy",
+   "light",
+   "folk"
+  ],
+  "energy": "medium",
+  "durationMs": 184507,
+  "url": "https://www.scottbuckley.com.au/library/wp-content/uploads/2024/03/Simplicity.mp3",
+  "sha256": "71cfdd6d81765a0624f6b48704a26cfbeb095f83190c1d52d9fcfba3fe1afb0b",
+  "sizeBytes": 7384513,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "'Simplicity' by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au"
+ },
+ {
+  "id": "effervescence",
+  "title": "Effervescence",
+  "artist": "Scott Buckley",
+  "moods": [
+   "chill",
+   "light",
+   "calm"
+  ],
+  "energy": "medium",
+  "durationMs": 413021,
+  "url": "https://www.scottbuckley.com.au/library/wp-content/uploads/2023/07/Effervescence.mp3",
+  "sha256": "215ff6ec113abbcfa3258028af322f651a40cf1102996b347dde873379b42674",
+  "sizeBytes": 16524218,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "'Effervescence' by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au"
+ },
+ {
+  "id": "ice-cream",
+  "title": "Ice Cream",
+  "artist": "Scott Buckley",
+  "moods": [
+   "playful",
+   "happy",
+   "light"
+  ],
+  "energy": "medium",
+  "durationMs": 253500,
+  "url": "https://www.scottbuckley.com.au/library/wp-content/uploads/2023/08/IceCream.mp3",
+  "sha256": "8cc1fc2e6547e7f4a6ae850924c8a7bf0baabd000ce12ec7710b0ea858db1dd4",
+  "sizeBytes": 10144088,
+  "license": "CC BY 4.0",
+  "licenseUrl": "http://creativecommons.org/licenses/by/4.0/",
+  "credit": "'Ice Cream' by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au"
  }
 ]

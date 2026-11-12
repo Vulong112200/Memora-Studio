@@ -2,29 +2,22 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  addClip, cancelJob, formatBytes, getTranscript, listMedia, setMediaMark, listScenes, onJobUpdated, removeMedia, submitJob,
-  type Job, type Media, type Project, type ScoredScene, type TagScore, type Transcript,
+  addClip, cancelJob, formatBytes, getTranscript, listMedia, listModels, setMediaMark, listScenes, onJobUpdated, removeMedia, submitJob,
+  type Job, type Media, type ModelInfo, type Project, type ScoredScene, type TagScore, type Transcript,
 } from "./api";
 import { clock } from "./Timeline";
+import { dateTime, L } from "./i18n";
+import { active, btn, Card, field, fileName, jobLabel, prepareMedia, preparation, Progress, Thumb } from "./ui";
 
 /** Offered in the file picker; FFprobe decides what is actually a video. */
 const VIDEO_EXTENSIONS = ["mp4", "mov", "m4v", "mkv", "avi", "mts", "m2ts", "3gp", "webm", "wmv"];
-const linkClass = "text-xs text-zinc-500 hover:underline";
-const buttonClass =
-  "rounded-md bg-zinc-900 px-4 py-1.5 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900";
 /** Progress units per file in media.proxy / media.analyze / media.transcribe jobs (src-tauri). */
 const STEP = 1000;
 /** Background jobs that work through a list of media ids. */
 const BACKGROUND = new Set(["media.proxy", "media.analyze", "media.transcribe", "media.tag"]);
-const JOB_LABEL: Record<string, string> = {
-  "media.proxy": "Creating preview proxies…",
-  "media.analyze": "Analysing scenes and image quality…",
-  "media.transcribe": "Transcribing speech (whisper.cpp, on this computer)…",
-  "media.tag": "Recognising visual concepts (OpenCLIP, on this computer)…",
-};
 
 /** Lower case without Vietnamese diacritics, so "xe dap" finds "xe đạp". */
-const fold = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").replace(/Đ/g, "d").toLowerCase();
+const fold = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/g, "d").replace(/Đ/g, "d").toLowerCase();
 
 function matches(m: Media, q: string) {
   const f = fold(q.trim());
@@ -38,9 +31,6 @@ const topTags = (tags: TagScore[] | null, n: number, min: number) =>
 interface ImportResult { imported: number; ids: number[]; failed: { path: string; error: string }[] }
 interface BatchResult { failed: { id: number; error: string }[] }
 
-const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
-const active = (j: Job | null) => !!j && (j.status === "queued" || j.status === "running");
-
 function duration(ms: number) {
   const s = Math.round(ms / 1000);
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -51,26 +41,26 @@ function resolution(m: Media) {
   return m.rotation % 180 === 0 ? `${m.width}×${m.height}` : `${m.height}×${m.width}`;
 }
 
-/** "working 40%" / "waiting" while a `kinds` job still has to process `m`, else null. */
+/** "40%" / "waiting" while a `kinds` job still has to process `m`, else null. */
 function working(m: Media, job: Job | null, kinds: string[], finished: boolean) {
   if (!active(job) || !kinds.includes(job!.kind) || finished) return null;
   const i = ((job!.params as { ids?: number[] } | null)?.ids ?? []).indexOf(m.id);
   if (i < 0) return null;
   const pct = Math.round(((job!.done - i * STEP) / STEP) * 100);
-  return pct > 0 && pct < 100 ? `working ${pct}%` : "waiting";
+  return pct > 0 && pct < 100 ? `${L("working", "đang xử lý")} ${pct}%` : L("waiting", "đang chờ");
 }
 
 /** Analysis state of one clip while `job` may be working on it. */
 function status(m: Media, job: Job | null) {
   const w = working(m, job, ["media.proxy", "media.analyze"], m.sceneCount !== null);
   if (w) return w;
-  if (m.sceneCount !== null) return `${m.sceneCount} scene${m.sceneCount === 1 ? "" : "s"}`;
-  return m.proxy ? "not analysed" : "–";
+  if (m.sceneCount !== null) return `${m.sceneCount} ${L("scenes", "cảnh")}`;
+  return m.proxy ? L("not analysed", "chưa phân tích") : "–";
 }
 
 function speech(m: Media, job: Job | null) {
-  if (m.audioStreams === 0) return "no audio";
-  return working(m, job, ["media.transcribe"], false) ?? (m.transcribed ? "transcribed" : "–");
+  if (m.audioStreams === 0) return L("no audio", "không tiếng");
+  return working(m, job, ["media.transcribe"], false) ?? (m.transcribed ? L("transcribed", "đã nhận dạng") : "–");
 }
 
 const pct = (x: number) => `${Math.round(x * 100)}`;
@@ -80,7 +70,7 @@ function SceneCard({ s, onPick }: { s: ScoredScene; onPick: () => void }) {
   const tone = t.total >= 0.7 ? "text-green-500" : t.total >= 0.4 ? "text-amber-500" : "text-red-500";
   return (
     <button className="w-40 shrink-0 rounded bg-zinc-900 p-1 text-left text-xs text-zinc-300 hover:bg-zinc-800" onClick={onPick}
-      title={`Sharpness ${pct(t.sharpness)} · Exposure ${pct(t.exposure)} · Brightness ${pct(t.brightness)} · Contrast ${pct(t.contrast)} · Stability ${pct(t.stability)}`}>
+      title={`${L("Sharpness", "Độ nét")} ${pct(t.sharpness)} · ${L("Exposure", "Phơi sáng")} ${pct(t.exposure)} · ${L("Brightness", "Độ sáng")} ${pct(t.brightness)} · ${L("Contrast", "Tương phản")} ${pct(t.contrast)} · ${L("Stability", "Độ ổn định")} ${pct(t.stability)}`}>
       {s.framePath ? <img className="h-20 w-full rounded object-cover" src={convertFileSrc(s.framePath)} alt="" /> : <div className="h-20 rounded bg-zinc-800" />}
       <div className="mt-1 flex justify-between">
         <span className="font-mono">{clock(s.startMs)}–{clock(s.endMs)}</span>
@@ -120,30 +110,32 @@ function Preview({ m, project, onClipAdded }: { m: Media; project: Project | nul
     if (!project) return;
     try {
       await addClip(project.id, m.id, inMs, outMs);
-      setMessage(`Added ${clock(outMs - inMs)} to ${project.name}.`);
+      setMessage(L(`Added ${clock(outMs - inMs)} to ${project.name}.`, `Đã thêm ${clock(outMs - inMs)} vào ${project.name}.`));
       onClipAdded();
     } catch (e) {
       setMessage(String(e));
     }
   }
 
+  const small = "rounded border border-zinc-600 px-2 py-0.5 hover:bg-zinc-800";
   return (
-    <div className="mt-3 rounded-lg bg-black">
+    <div className="mb-4 rounded-xl bg-black">
       {m.proxy ? (
         <video ref={video} key={m.id} className="mx-auto max-h-96" src={convertFileSrc(m.proxy)} controls autoPlay />
       ) : (
         <div className="relative">
           {m.thumb && <img className="mx-auto max-h-96" src={convertFileSrc(m.thumb)} alt="" />}
-          <p className="absolute inset-x-0 bottom-2 text-center text-sm text-zinc-300">Preview is available once the proxy is created.</p>
+          <p className="absolute inset-x-0 bottom-2 text-center text-sm text-zinc-300">{L("Preview is available once the video is analysed.", "Xem trước được khi video đã phân tích.")}</p>
         </div>
       )}
       <p className="truncate px-3 py-1.5 text-xs text-zinc-400" title={m.path}>
-        {m.path} · preview proxy only; exports always use the original file
+        {m.path} · {L("preview copy only; exports always use the original file", "chỉ là bản xem trước; khi xuất luôn dùng file gốc")}
       </p>
       {scenes.length > 0 && (
         <div className="px-3 pb-2">
           <p className="mb-1 text-xs text-zinc-500">
-            Scenes · technical score 0–100 (sharpness, exposure, brightness, contrast, stability). Low scores are hints, not exclusions. Click to select.
+            {L("Scenes · technical score 0–100 (sharpness, exposure, brightness, contrast, stability). Low scores are hints, not exclusions. Click to select.",
+              "Các cảnh · điểm kỹ thuật 0–100 (độ nét, phơi sáng, độ sáng, tương phản, độ ổn định). Điểm thấp chỉ là gợi ý. Bấm để chọn đoạn.")}
           </p>
           <div className="flex gap-2 overflow-x-auto pb-1">
             {scenes.map((s) => <SceneCard key={s.id} s={s} onPick={() => pick(s)} />)}
@@ -153,11 +145,11 @@ function Preview({ m, project, onClipAdded }: { m: Media; project: Project | nul
       {transcript && (
         <div className="px-3 pb-2 text-xs text-zinc-300">
           <p className="mb-1 text-zinc-500">
-            Speech · {transcript.modelId}{transcript.language ? ` · language ${transcript.language}` : ""} · machine transcription, may
-            contain mistakes or text invented from background noise. Click a line to select it.
+            {L("Speech", "Lời nói")} · {transcript.modelId}{transcript.language ? ` · ${transcript.language}` : ""} ·{" "}
+            {L("machine transcription, may contain mistakes. Click a line to select it.", "nhận dạng tự động, có thể sai. Bấm một dòng để chọn đoạn đó.")}
           </p>
           {transcript.segments.length === 0 ? (
-            <p className="text-zinc-500">No speech found.</p>
+            <p className="text-zinc-500">{L("No speech found.", "Không có lời nói.")}</p>
           ) : (
             <div className="max-h-40 overflow-y-auto">
               {transcript.segments.map((s, i) => (
@@ -171,18 +163,13 @@ function Preview({ m, project, onClipAdded }: { m: Media; project: Project | nul
       )}
       {m.proxy && (
         <div className="flex flex-wrap items-center gap-2 px-3 pb-2 text-xs text-zinc-300">
-          <button className="rounded border border-zinc-600 px-2 py-0.5 hover:bg-zinc-800" onClick={() => setIn(now())}>Set In</button>
+          <button className={small} onClick={() => setIn(now())}>{L("Set In", "Đặt điểm vào")}</button>
           <span className="font-mono">{clock(inMs)}</span>
-          <button className="rounded border border-zinc-600 px-2 py-0.5 hover:bg-zinc-800" onClick={() => setOut(now())}>Set Out</button>
+          <button className={small} onClick={() => setOut(now())}>{L("Set Out", "Đặt điểm ra")}</button>
           <span className="font-mono">{clock(outMs)}</span>
           <span className="text-zinc-500">({clock(Math.max(0, outMs - inMs))})</span>
-          <button
-            className="ml-auto rounded bg-zinc-100 px-3 py-1 font-medium text-zinc-900 disabled:opacity-40"
-            disabled={!project || outMs <= inMs}
-            onClick={add}
-            title={project ? undefined : "Open a project first"}
-          >
-            {project ? `Add to ${project.name}` : "Open a project to add clips"}
+          <button className="ml-auto rounded bg-zinc-100 px-3 py-1 font-medium text-zinc-900 disabled:opacity-40" disabled={!project || outMs <= inMs} onClick={add}>
+            {project ? L(`Add to ${project.name}`, `Thêm vào ${project.name}`) : L("Open a project to add clips", "Mở một dự án để thêm clip")}
           </button>
           {message && <span className="w-full text-zinc-400">{message}</span>}
         </div>
@@ -204,22 +191,14 @@ function MediaRow({ m, job, selected, onSelect, onRemoved, onError, onChanged }:
   const mark = (change: Partial<typeof m.mark>) => setMediaMark(m.id, { ...m.mark, ...change }).then(onChanged).catch((e) => onError(String(e)));
   const recorded = m.sourceCreatedAt ? new Date(m.sourceCreatedAt) : null;
   return (
-    <tr
-      className={`cursor-pointer border-t border-zinc-200 dark:border-zinc-800 ${selected ? "bg-zinc-100 dark:bg-zinc-800" : ""}`}
-      onClick={onSelect}
-    >
-      <td className="py-1.5 pr-2">
-        {m.thumb ? <img className="h-9 w-16 rounded object-cover" src={convertFileSrc(m.thumb)} alt="" /> : <div className="h-9 w-16 rounded bg-zinc-200 dark:bg-zinc-800" />}
-      </td>
+    <tr className={`cursor-pointer border-t border-zinc-200 dark:border-zinc-800 ${selected ? "bg-indigo-50 dark:bg-indigo-950/40" : "hover:bg-zinc-50 dark:hover:bg-zinc-800/50"}`} onClick={onSelect}>
+      <td className="py-1.5 pr-2"><Thumb path={m.thumb} className="h-10 w-[72px]" /></td>
       <td className="max-w-56 truncate font-medium" title={m.path}>
-        <button className="hover:underline" onClick={(e) => { e.stopPropagation(); onSelect(); }} aria-pressed={selected}>
-          {fileName(m.path)}
-        </button>
+        <button className="hover:underline" onClick={(e) => { e.stopPropagation(); onSelect(); }} aria-pressed={selected}>{fileName(m.path)}</button>
       </td>
-      <td>{recorded && !isNaN(recorded.getTime()) ? recorded.toLocaleString() : "–"}</td>
+      <td>{recorded && !isNaN(recorded.getTime()) ? dateTime(recorded) : "–"}</td>
       <td>{duration(m.durationMs)}</td>
       <td>{resolution(m)}{m.fps ? ` · ${Math.round(m.fps * 100) / 100} fps` : ""}</td>
-      <td>{m.videoCodec}{m.audioCodec ? ` / ${m.audioCodec}` : " / no audio"}</td>
       <td className="text-right">{formatBytes(m.size)}</td>
       <td className="pl-3 text-xs text-zinc-500">{status(m, job)}</td>
       <td className="pl-3 text-xs text-zinc-500">{speech(m, job)}</td>
@@ -228,19 +207,20 @@ function MediaRow({ m, job, selected, onSelect, onRemoved, onError, onChanged }:
       </td>
       <td className="pl-3 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
         <button className={`mr-2 text-sm ${m.mark.favorite ? "text-amber-500" : "text-zinc-400 hover:text-amber-500"}`} aria-pressed={m.mark.favorite}
-          onClick={() => mark({ favorite: !m.mark.favorite })} title="Favorite: preferred by Smart edit">★</button>
+          onClick={() => mark({ favorite: !m.mark.favorite })} title={L("Favorite: preferred by Smart edit", "Yêu thích: Dựng tự động ưu tiên")}>★</button>
         <button className={`mr-2 text-xs ${m.mark.excluded ? "text-red-600" : "text-zinc-400 hover:text-red-600"}`} aria-pressed={m.mark.excluded}
-          onClick={() => mark({ excluded: !m.mark.excluded })} title="Exclude: never used by Smart edit">{m.mark.excluded ? "excluded" : "⊘"}</button>
+          onClick={() => mark({ excluded: !m.mark.excluded })} title={L("Exclude: never used by Smart edit", "Loại trừ: Dựng tự động không dùng")}>
+          {m.mark.excluded ? L("excluded", "đã loại") : "⊘"}
+        </button>
         {confirming ? (
           <>
-            <button className="text-xs text-red-600 hover:underline" onClick={() => removeMedia(m.id).then(onRemoved).catch((e) => onError(String(e)))}>
-              Remove
-            </button>{" "}
-            <button className={linkClass} onClick={() => setConfirming(false)}>Keep</button>
+            <button className="text-xs text-red-600 hover:underline" onClick={() => removeMedia(m.id).then(onRemoved).catch((e) => onError(String(e)))}>{L("Remove", "Gỡ")}</button>{" "}
+            <button className={btn.link} onClick={() => setConfirming(false)}>{L("Keep", "Giữ")}</button>
           </>
         ) : (
-          <button className={linkClass} onClick={() => setConfirming(true)} title="Removes it from the library and from project timelines. The file stays on disk.">
-            Remove
+          <button className={btn.link} onClick={() => setConfirming(true)}
+            title={L("Removes it from the library and from project timelines. The file stays on disk.", "Gỡ khỏi thư viện và timeline các dự án. File vẫn còn trên ổ đĩa.")}>
+            {L("Remove", "Gỡ")}
           </button>
         )}
       </td>
@@ -248,32 +228,33 @@ function MediaRow({ m, job, selected, onSelect, onRemoved, onError, onChanged }:
   );
 }
 
-export default function MediaLibrary({ project, onClipAdded }: { project: Project | null; onClipAdded: () => void }) {
+export default function MediaLibrary({ project, version, onClipAdded, onSettings }: {
+  project: Project | null; version: number; onClipAdded: () => void; onSettings: () => void;
+}) {
   const [media, setMedia] = useState<Media[] | null>(null);
+  const [models, setModels] = useState<ModelInfo[]>([]);
   const [importJob, setImportJob] = useState<Job | null>(null);
-  const [job, setJob] = useState<Job | null>(null); // latest proxy / analysis job
+  const [job, setJob] = useState<Job | null>(null); // latest proxy / analysis / tag / transcription job
   const [selected, setSelected] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [speechModel, setSpeechModel] = useState("whisper-small");
   const [query, setQuery] = useState("");
 
   const load = useCallback(() => {
     listMedia().then(setMedia).catch((e) => setError(String(e)));
+    listModels().then(setModels).catch(() => {});
   }, []);
-
-  // Analysis creates missing proxies first, so one job covers both.
-  const analyze = useCallback((ids: number[]) => {
-    if (ids.length > 0) submitJob("media.analyze", { ids, quality: "balanced" }).then(setJob).catch((e) => setError(String(e)));
-  }, []);
+  useEffect(load, [load, version]);
 
   useEffect(() => {
-    load();
     const unlisten = onJobUpdated((j) => {
       if (j.kind === "media.import") {
         setImportJob(j);
         if (j.status === "completed") {
-          load();
-          analyze((j.result as ImportResult).ids);
+          // New videos get everything Smart edit needs, without the owner having to find each button.
+          const ids = new Set((j.result as ImportResult).ids);
+          Promise.all([listMedia(), listModels()])
+            .then(([all, ms]) => { setMedia(all); return prepareMedia(all.filter((m) => ids.has(m.id)), ms); })
+            .catch((e) => setError(String(e)));
         }
       } else if (BACKGROUND.has(j.kind)) {
         setJob((prev) => {
@@ -284,121 +265,97 @@ export default function MediaLibrary({ project, onClipAdded }: { project: Projec
       }
     });
     return () => { unlisten.then((f) => f()); };
-  }, [load, analyze]);
+  }, [load]);
 
   async function addVideos() {
     setError(null);
-    const picked = await open({ multiple: true, title: "Add videos", filters: [{ name: "Videos", extensions: VIDEO_EXTENSIONS }] });
+    const picked = await open({ multiple: true, title: L("Add videos", "Thêm video"), filters: [{ name: "Videos", extensions: VIDEO_EXTENSIONS }] });
     if (!picked || picked.length === 0) return;
     submitJob("media.import", { paths: picked }).then(setImportJob).catch((e) => setError(String(e)));
   }
 
   const importResult = importJob?.status === "completed" ? (importJob.result as ImportResult) : null;
   const jobResult = job?.status === "completed" ? (job.result as BatchResult) : null;
-  const notAnalysed = media?.filter((m) => m.sceneCount === null).map((m) => m.id) ?? [];
-  const notTagged = media?.filter((m) => m.tags === null).map((m) => m.id) ?? [];
   const shown = media?.filter((m) => matches(m, query)) ?? [];
-  const notTranscribed = media?.filter((m) => m.audioStreams > 0 && !m.transcribed).map((m) => m.id) ?? [];
-  const transcribe = (ids: number[]) =>
-    submitJob("media.transcribe", { ids, model: speechModel, language: "auto" }).then(setJob).catch((e) => setError(String(e)));
+  const prep = preparation(media ?? [], models);
+  const todo = prep.analyse.length + prep.tag.length + prep.transcribe.length;
   const current = media?.find((m) => m.id === selected);
+  const busy = active(job) || active(importJob);
 
   return (
-    <section className="rounded-xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Media library</h2>
-        <div className="flex flex-wrap justify-end gap-2">
-          {notAnalysed.length > 0 && !active(job) && (
-            <button className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm dark:border-zinc-700" onClick={() => analyze(notAnalysed)}>
-              Analyze {notAnalysed.length} video{notAnalysed.length === 1 ? "" : "s"}
-            </button>
-          )}
-          {notTagged.length > 0 && !active(job) && (
-            <button className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm dark:border-zinc-700"
-              onClick={() => submitJob("media.tag", { ids: notTagged }).then(setJob).catch((e) => setError(String(e)))}>
-              Tag {notTagged.length} video{notTagged.length === 1 ? "" : "s"}
-            </button>
-          )}
-          {notTranscribed.length > 0 && !active(job) && (
-            <>
-              <select className="rounded-md border border-zinc-300 bg-transparent px-2 text-sm dark:border-zinc-700" value={speechModel}
-                onChange={(e) => setSpeechModel(e.target.value)} aria-label="Speech model" title="Speech model (install it in AI models first)">
-                <option value="whisper-base">Whisper base (faster)</option>
-                <option value="whisper-small">Whisper small (more accurate)</option>
-              </select>
-              <button className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm dark:border-zinc-700" onClick={() => transcribe(notTranscribed)}>
-                Transcribe {notTranscribed.length} video{notTranscribed.length === 1 ? "" : "s"}
-              </button>
-            </>
-          )}
-          <button className={buttonClass} disabled={active(importJob)} onClick={addVideos}>Add videos</button>
-        </div>
-      </div>
+    <Card title={L("Video library", "Thư viện video")} actions={
+      <>
+        {todo > 0 && !busy && (
+          <button className={btn.secondary} onClick={() => prepareMedia(media ?? [], models).catch((e) => setError(String(e)))}
+            title={L("Scenes and image quality, then what is on screen (AI), then speech (AI)", "Cảnh và chất lượng hình, rồi nội dung hình (AI), rồi lời nói (AI)")}>
+            {L(`Analyse (${todo} steps)`, `Phân tích (${todo} bước)`)}
+          </button>
+        )}
+        <button className={btn.primary} disabled={active(importJob)} onClick={addVideos}>{L("+ Add videos", "+ Thêm video")}</button>
+      </>
+    }>
       <p className="text-xs text-zinc-500">
-        Videos are read in place. Memora Studio never copies, moves or modifies the originals. Small preview copies
-        (proxies) and analysis frames are kept in the data folder's cache.
+        {L("Videos are read in place: Memora Studio never copies, moves or modifies the originals. New videos are analysed automatically.",
+          "Video được đọc tại chỗ: Memora Studio không sao chép, di chuyển hay sửa file gốc. Video mới được phân tích tự động.")}
+        {prep.missingModels && media && media.length > 0 && (
+          <> {L("AI models are not all installed, so some analysis is skipped:", "Chưa cài đủ model AI nên một số bước phân tích bị bỏ qua:")}{" "}
+            <button className="text-indigo-600 hover:underline" onClick={onSettings}>{L("Settings › AI models", "Cài đặt › Model AI")}</button>.</>
+        )}
       </p>
       {active(importJob) && (
         <p className="mt-2 text-sm text-zinc-500">
-          Reading metadata… {importJob!.total > 0 && `${importJob!.done}/${importJob!.total}`}{" "}
-          <button className={linkClass} onClick={() => cancelJob(importJob!.id).catch((e) => setError(String(e)))}>Cancel</button>
+          {jobLabel("media.import")}… {importJob!.total > 0 && `${importJob!.done}/${importJob!.total}`}{" "}
+          <button className={btn.link} onClick={() => cancelJob(importJob!.id).catch((e) => setError(String(e)))}>{L("Cancel", "Huỷ")}</button>
         </p>
       )}
       {active(job) && (
-        <p className="mt-2 text-sm text-zinc-500">
-          {JOB_LABEL[job!.kind]}{" "}
-          {job!.total > 0 && `${Math.round((job!.done / job!.total) * 100)}%`}{" "}
-          <button className={linkClass} onClick={() => cancelJob(job!.id).catch((e) => setError(String(e)))}>Cancel</button>
-        </p>
+        <div className="mt-2 text-sm text-zinc-500">
+          {jobLabel(job!.kind)}… {job!.total > 0 && `${Math.round((job!.done / job!.total) * 100)}%`}{" "}
+          <button className={btn.link} onClick={() => cancelJob(job!.id).catch((e) => setError(String(e)))}>{L("Cancel", "Huỷ")}</button>
+          <div className="mt-1 max-w-sm"><Progress value={job!.total ? job!.done / job!.total : 0} /></div>
+        </div>
       )}
       {importJob?.status === "failed" && <p className="mt-2 text-sm text-red-600">{importJob.error}</p>}
       {job?.status === "failed" && <p className="mt-2 text-sm text-red-600">{job.error}</p>}
       {importResult && (
         <div className="mt-2 text-sm">
-          <p className="text-zinc-500">Added or refreshed {importResult.imported} video{importResult.imported === 1 ? "" : "s"}.</p>
-          {importResult.failed.map((f) => (
-            <p key={f.path} className="text-amber-600" title={f.path}>{fileName(f.path)}: {f.error}</p>
-          ))}
+          <p className="text-zinc-500">{L(`Added or refreshed ${importResult.imported} video(s).`, `Đã thêm / cập nhật ${importResult.imported} video.`)}</p>
+          {importResult.failed.map((f) => <p key={f.path} className="text-amber-600" title={f.path}>{fileName(f.path)}: {f.error}</p>)}
         </div>
       )}
-      {jobResult?.failed.map((f) => (
-        <p key={f.id} className="mt-1 text-sm text-amber-600">#{f.id}: {f.error}</p>
-      ))}
+      {jobResult?.failed.map((f) => <p key={f.id} className="mt-1 text-sm text-amber-600">#{f.id}: {f.error}</p>)}
       {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
-      {current && <Preview key={current.id} m={current} project={project} onClipAdded={onClipAdded} />}
-      {media?.length === 0 && <p className="mt-3 text-sm text-zinc-500">No videos yet.</p>}
-      {media && media.length > 0 && (
-        <input className="mt-3 w-full rounded-md border border-zinc-300 bg-transparent px-3 py-1.5 text-sm dark:border-zinc-700"
-          placeholder="Search by file name or visual concept (xe đạp, beach, hoàng hôn…)" value={query}
-          onChange={(e) => setQuery(e.target.value)} aria-label="Search media" />
+      {media?.length === 0 && (
+        <div className="mt-4 rounded-xl border border-dashed border-zinc-300 p-8 text-center dark:border-zinc-700">
+          <p className="text-sm text-zinc-500">{L("No videos yet. Add the videos of a trip or an event to begin.", "Chưa có video. Thêm video của một chuyến đi hay sự kiện để bắt đầu.")}</p>
+          <button className={`${btn.primary} mt-3`} onClick={addVideos}>{L("+ Add videos", "+ Thêm video")}</button>
+        </div>
       )}
-      {media && media.length > 0 && shown.length === 0 && <p className="mt-2 text-sm text-zinc-500">No match.</p>}
+      {media && media.length > 0 && (
+        <input className={`${field} mb-3 mt-3 w-full`} placeholder={L("Search by file name or what is on screen (xe đạp, beach, hoàng hôn…)", "Tìm theo tên file hoặc nội dung hình (xe đạp, biển, hoàng hôn…)")}
+          value={query} onChange={(e) => setQuery(e.target.value)} aria-label={L("Search media", "Tìm video")} />
+      )}
+      {current && <Preview key={current.id} m={current} project={project} onClipAdded={onClipAdded} />}
+      {media && media.length > 0 && shown.length === 0 && <p className="mt-2 text-sm text-zinc-500">{L("No match.", "Không có kết quả.")}</p>}
       {shown.length > 0 && (
         <div className="overflow-x-auto">
-        <table className="mt-3 w-full text-sm">
-          <thead className="text-left text-xs text-zinc-500">
-            <tr>
-              <th /><th className="py-1">File</th><th>Recorded</th><th>Length</th><th>Resolution</th><th>Codec</th>
-              <th className="text-right">Size</th><th className="pl-3">Analysis</th><th className="pl-3">Speech</th><th className="pl-3">Concepts</th><th />
-            </tr>
-          </thead>
-          <tbody>
-            {shown.map((m) => (
-              <MediaRow
-                key={m.id}
-                m={m}
-                job={job}
-                selected={m.id === selected}
-                onSelect={() => setSelected(m.id === selected ? null : m.id)}
-                onRemoved={() => { if (m.id === selected) setSelected(null); load(); }}
-                onError={setError}
-                onChanged={load}
-              />
-            ))}
-          </tbody>
-        </table>
+          <table className="w-full text-sm">
+            <thead className="text-left text-xs text-zinc-500">
+              <tr>
+                <th /><th className="py-1">File</th><th>{L("Recorded", "Ngày quay")}</th><th>{L("Length", "Độ dài")}</th><th>{L("Resolution", "Độ phân giải")}</th>
+                <th className="text-right">{L("Size", "Dung lượng")}</th><th className="pl-3">{L("Analysis", "Phân tích")}</th><th className="pl-3">{L("Speech", "Lời nói")}</th>
+                <th className="pl-3">{L("On screen", "Nội dung")}</th><th />
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((m) => (
+                <MediaRow key={m.id} m={m} job={job} selected={m.id === selected} onSelect={() => setSelected(m.id === selected ? null : m.id)}
+                  onRemoved={() => { if (m.id === selected) setSelected(null); load(); }} onError={setError} onChanged={load} />
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
-    </section>
+    </Card>
   );
 }

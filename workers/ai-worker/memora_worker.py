@@ -200,6 +200,23 @@ def validate_openvino_ir(job):
     return {"validation": "openvino-ir", "openvino": ov.__version__.split("-")[0], "inputs": inputs, "devices": results}
 
 
+def photo_render(job):
+    """Photo editor (ADR 0006): render an edit stack. params: path, edits, maxSide (0 = full size), out, quality,
+    showMask, info (also return the EXIF date)."""
+    import photo
+
+    p = job.params
+    return photo.render_file(p["path"], p.get("edits") or {}, int(p.get("maxSide", 0)), p["out"], int(p.get("quality", 92)),
+                             bool(p.get("showMask")), bool(p.get("info")))
+
+
+def photo_auto(job):
+    """Photo editor: suggested starting values for one photo. params: path."""
+    import photo
+
+    return photo.auto(job.params["path"])
+
+
 def diagnostic_steps(job):
     """Test-only: N steps of 50 ms with progress and cancellation."""
     steps = int(job.params.get("steps", 10))
@@ -226,6 +243,8 @@ JOBS = {
     "analyze_video": analyze_video,
     "validate_openvino_ir": validate_openvino_ir,
     "tag_video": tag_video,
+    "photo_render": photo_render,
+    "photo_auto": photo_auto,
     "diagnostic.steps": diagnostic_steps,
     "diagnostic.crash": diagnostic_crash,
     "diagnostic.block": diagnostic_block,

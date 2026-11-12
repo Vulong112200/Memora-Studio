@@ -28,3 +28,18 @@ Project rules: never trust unverified URLs; record source, licence and checksum;
 ## Consequences
 - Library music needs internet at export time; offline exports must use the owner's own files (clear error message).
 - The catalog is fixed in the app; adding tracks means verifying and recording them the same way.
+
+## Amendment 2026-11-09 (owner review of the Nam Cát Tiên exports)
+- The owner rejected the Kevin MacLeod tracks used ("Blue Feather", "Achaidh Cheide": dated, "sounds like pirates")
+  and allowed up to 2 GB for better free music.
+- Added 10 tracks by Scott Buckley (scottbuckley.com.au), CC BY 4.0: on 2026-11-09 each track page was fetched and
+  checked to link the exact file URL and to state "Creative Commons Attribution 4.0"; the files were downloaded,
+  size + SHA-256 + duration measured and recorded. Required credit (from the track pages):
+  `'<Title>' by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au`. His FAQ says the library is under
+  Content ID that looks for the credit in the post description → the UI tells the user to put it in the caption too.
+- Rejected sources: Pixabay (terms forbid automated / bulk copying), Free Music Archive (no automated fetch, mixed
+  licences), Bandcamp/itch-only artists (no stable direct URL), Mixkit (licence text not verifiable first-hand).
+- **Library music is now kept** in `<data root>\music\<id>.mp3` after the first download (verified on every use,
+  re-downloaded if damaged) instead of being deleted after each export: offline exports, and the artist asked to
+  spare his bandwidth. The webview CSP allows previews from `https://www.scottbuckley.com.au` too.
+- Moods are still the artists' own descriptions (not heard by the developer); the owner chooses by listening.
