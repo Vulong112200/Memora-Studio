@@ -202,6 +202,8 @@ export interface ExportOptions {
   music: { path: string; library: string | null; volume: number; duck: boolean } | null;
   titles: { title: string; subtitle: string; ending: string; captions: boolean };
   normalize: boolean;
+  /** Lighter file for sharing (video ≈ 10 Mbit/s); file name ends in `-share`. */
+  share?: boolean;
 }
 
 export const getExportOptions = (projectId: number) => invoke<ExportOptions>("get_export_options", { projectId });

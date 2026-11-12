@@ -398,10 +398,16 @@ export default function Timeline({ project, version }: { project: Project; versi
           onChange={(e) => {
             const p = e.target.value as ExportPreset;
             setPreset(p);
-            if (options) change({ ...options, fill: p === "story" || p === "reels" });
+            if (options) change({ ...options, fill: p === "story" || p === "reels", share: p === "story" || p === "reels" });
           }}>
           {PRESETS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
         </select>
+        {options && (
+          <label className="flex items-center gap-1 text-xs" title={L("About 75 MB per minute instead of 300–400 MB; still sharp on a phone", "Khoảng 75 MB mỗi phút thay vì 300–400 MB; vẫn nét trên điện thoại")}>
+            <input type="checkbox" checked={!!options.share} onChange={(e) => change({ ...options, share: e.target.checked })} />
+            {L("Light file for sharing", "Bản nhẹ để chia sẻ")}
+          </label>
+        )}
         <button className={btn.primary} disabled={clips.length === 0 || !!exporting || !options}
           onClick={() => submitJob("media.export", { projectId: project.id, preset, options }).then(setJob).catch((e) => setError(String(e)))}>
           {L("Export video", "Xuất video")}

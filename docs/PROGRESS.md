@@ -136,27 +136,38 @@ See `docs/MODEL_PROPOSAL.md` §4: whisper.cpp b5454 runtime installed in `<data 
 - Verified: 91 Rust tests (new: photo rows / edits / dates, real worker import → preview → auto → two exports), `python photo.py`, `tsc --noEmit`, release build, app window screenshots of the Photos page.
 - Next (needs approval of model downloads): B2 select + remove (MobileSAM, MI-GAN), B3 retouch (YuNet + landmarks), B4 bokeh (Depth Anything V2 Small, BiRefNet-lite), B6 AI upscale / denoise.
 
+#### Repo on D:, sharing export, ★ always in, telemetry off (2026-11-12, owner: "chuyển code sang ổ D", "video nhẹ hơn để share lên story", "★ luôn có trong video tổng hợp… coi kỹ hơn", "telemetry: tự quyết")
+- Repository moved `E:\Memora Studio\` → `D:\Memora Studio\` (software drive; robocopy, 32 045 files, 0 failures, `target` rebuilt). Venvs work from the new place (`pyvenv.cfg` command lines updated; use `python -m pip`, the `Scripts\*.exe` launchers still name E:). App and `memora-cli` rebuilt there (the dev worker path is compiled in). Claude memory copied to the new project key. ADR 0001 amendment; CLAUDE.md, FOLDERS.md updated. The old `E:\Memora Studio\` copy is for the owner to delete after opening D: in VS Code.
+- Sharing export: `Options.share` → video ≈ 10 Mbit/s (QSV VBR / x264 capped) instead of archive-grade constant quality, file name `…-<preset>-share-…`. Chosen from measurements on the 46 s reel: 10 Mbit/s → 55 MB instead of 218 MB, SSIM 0.954 (QSV) / 0.958 (x264); 6 Mbit/s 0.93, 12 Mbit/s 0.96. Timeline checkbox "Bản nhẹ để chia sẻ" (on when Story / Reels is picked), Story / Reels plans set it, CLI `options --share on|off`.
+- ★ files (owner: the recap must always show them): a ★ pass before any other selection — best clean window of each ★ file, then one more per 3 min of the file spread over it, extra ★ clips ≤ 50 % of the length; ★ files are cut into overlapping windows every half clip length and allow twice as many clips per long shot; a ★ file with nothing usable is named in "skipped". Values are initial.
+- OpenVINO telemetry: opted out (consent file `0`). It was on by default; the dev-time converter had run 9 times. The app's inference never used it.
+- Verified (from `D:\Memora Studio`): 103 Rust tests (new `sharing_export_caps_the_bitrate`, `favourites_always_appear_and_long_ones_are_looked_at_closely`), `tsc --noEmit`, release build of app + CLI.
+- Real data: project #5 reel exported with `options 5 --share on` → `projects\5\exports\Nam Cát Tiên – Reels-reels-share-1794491201.mp4` (46.1 s 1080×1920, 58 MB vs 229 MB archive, hybrid QSV 67 s, validation passed, frames checked). ★ on a database copy: the trip's 5 ★ files were already in both plans by rank; now guaranteed — recap #4 plan 41 → 42 clips with 12 ★ clips (was 11); 30 s reel unchanged (11 of 14 clips from ★ files).
+
+### Awaiting owner review (2026-11-12 self-review: no new feature slices until these are reviewed)
+Slices 5.1–5.4 and Phase 6 were used in owner reviews rounds 1–3 (Nam Cát Tiên) but never formally approved. Short check per slice, in the release app:
+
+| Slice | Try | Expect |
+|---|---|---|
+| 5.1–5.4 models, transcription, tagging, VAD | Settings → AI models; Library → Analyse one clip | Models "ready"; scenes, tags and speech filled; transcript lines click to seek |
+| Phase 6 Smart edit + request box | Project → Smart edit, type a sentence | "Understood:" read-back matches the sentence; plan reasons readable; Apply fills the timeline |
+| Photo editor B1 | Photos page → Auto, sliders, hold for original, export | Natural sky (never replaced); export next to the others, original unchanged |
+| AI photo tools | Retouch a face, click to remove an object, background blur | Skin cleaned without plastic look; removed area filled plausibly |
+| Video from photos | Photos → 🎬 Make a video | Order, seconds, music kept; validation report passes |
+| Mixed timeline | Project → Edit & export: strip, join chips, ▶ join preview, + Add photos | Each join changeable and previewable |
+| Photos in Smart edit | Request "… có cả ảnh …" | Photos land right after the clip of the same moment |
+
 ### Still open (owner decisions or later work)
-- Packaging / installer: needs the FFmpeg GPL licence review before any distribution and an embedded Python runtime (ADR 0002); not built.
-- Bundled music library (user's own files work now), subject-aware crop, text animation presets, GPS/location, month/year grouping in the library, Whisper GPU experiment.
-- Offline: no network use except the Model Manager's explicit, user-confirmed downloads (all models are installed locally now).
-
-### Not done yet / next steps
-
-1. **Model proposal (needs owner approval before any download):** for each model the official source, pinned revision, license, size and SHA-256:
-   - OpenCLIP ViT-B/32 (checkpoint candidate `laion2b_s34b_b79k`) — license review; export to OpenVINO IR needs **dev-time torch in a separate venv (separate approval)**; output-consistency check vs PyTorch CPU.
-   - whisper.cpp (pinned release, CPU build) + Whisper base multilingual (ggml); small on demand.
-2. After approval: fill models.json, OpenCLIP embedding job (scene frames → embeddings cache, text search), whisper.cpp transcription job (Vietnamese + English test coverage), CPU/GPU benchmarks, optional NPU experiment.
-3. Phase 6 Editing Intelligence (needs approval): split long continuous scenes into candidate windows (all DJI samples are single long shots), clip selection, presets, Editing Plan review UI.
-4. Phase 7 Product completion (needs approval).
+- Self-review 2026-11-12, proposed order: R1 relink for videos (reuse the photo relink pattern), T7 visual-appeal cue (tested on footage other than Nam Cát Tiên — current thresholds were tuned on one trip), backend texts in Vietnamese (plan reasons, "Understood" chips, errors), M1 HDR warning, several outputs (Story / Reel / long) from one approved plan (spec §7.1).
+- Spec gaps not started: month/year and event grouping, manual tags, GPS/location (§7), Manual Assist mode (§6.4), A4 worker memory during render (§9.1, measure first).
+- Packaging / installer: needs the FFmpeg GPL licence review and an embedded Python runtime (ADR 0002); Phase 7 approval.
+- Other audit items: E3, E5 tests, M2, M3 manual crop, M4, A1–A3, V1, N1–N11, T6, B6 (Real-ESRGAN).
 
 ### Known limitations carried forward
-- Score thresholds in `scoring.rs` are initial assumptions; tune on real libraries.
-- Export letterboxes mismatched aspect ratios (no smart crop); HDR (PQ/HLG) not tone-mapped; export bitrate generous (~29 Mbit/s at 1080p).
-- No FFprobe/FFmpeg timeout for hung processes; job list is in memory only; worker is not stopped when idle.
-- Download cancellation (curl kill) is not covered by an automated test.
-- Packaging: `analysis.py` must ship next to `memora_worker.py`; installer not built yet; FFmpeg GPL licence must be revisited before distribution.
-- Pending owner decisions: OpenVINO telemetry opt-out, deleting spike artifacts (~1.9 GB in repo build dirs, ~1.6 GB in `E:\Memora Data\cache\spike`), UI language (English now).
+- Score and Editing Core thresholds are initial values; most were tuned on one trip (handlebar-mounted cycling footage).
+- HDR (PQ/HLG) not detected or tone-mapped; export bitrate archive-grade (≈57 Mbit/s at 1080p for the recap).
+- Job list is in memory only; the AI worker is not stopped when idle; download cancellation (curl kill) has no automated test.
+- No frontend unit tests; UI checked with app-window screenshots only.
 
 ### How to resume
 - Read `CLAUDE.md` (status + rules) and this file.

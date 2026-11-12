@@ -242,7 +242,7 @@ Order of operations (`render`): geometry (rotate 90° steps, straighten with zoo
 | numpy | 2.5.4 | Arrays (all jobs) |
 | opencv-python-headless | 5.0.0.93 | Decode, resize, Laplacian, phase correlation, JPEG (analysis, tagging) |
 | openvino | 2026.4.1 | Inference runtime (`validate_devices`, `validate_openvino_ir`, `tag_video`, `photo_analyze`, `hello`) |
-| openvino-telemetry | 2025.2.0 | Dependency of openvino |
+| openvino-telemetry | 2025.2.0 | Dependency of openvino; used only by the model converter (`ov.convert_model`, dev-time `tools/clip-export`), not by inference. Opted out on this PC 2026-11-12 (`%LOCALAPPDATA%\Intel Corporation\openvino_telemetry` = `0`, via `python -m openvino_telemetry.opt_in_out --opt_out`) |
 | scenedetect | 0.7.2 | `AdaptiveDetector` (analysis) |
 | click | 8.5.1 | Dependency of scenedetect |
 | colorama | 0.4.6 | Dependency (click/tqdm on Windows) |

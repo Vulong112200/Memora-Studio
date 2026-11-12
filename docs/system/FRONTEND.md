@@ -2,7 +2,7 @@
 
 The React webview of the Tauri app: a sidebar with five pages (Library, Projects, Photos, Jobs, Settings), a "Next step" banner and a job bar; cards call Rust commands through typed wrappers and follow background jobs through `job-updated` events. Bilingual (Vietnamese default, English).
 
-Last verified: 2026-11-12 against commit `12706f3` + uncommitted changes.
+Last verified: 2026-11-12 against commit `8c45781` + uncommitted changes.
 
 Index of all system docs: [README.md](README.md). The `sync-docs` skill (`.claude/skills/sync-docs/`) keeps this file current; run it after any change under `apps/desktop/` outside `src-tauri/`.
 
@@ -221,7 +221,7 @@ useEffect(() => {
 | `Wishes` | `editing::Wishes` | `prefer[], less[], avoid[]` (tag `en` names), `targetMs, preset, color, title, ending, captions, music` (all nullable), `request` (raw text) |
 | `RequestReading` | `request::Request` | `style, from, to` (nullable), `wishes`, `understood[]` (human-readable chips) |
 | `Plan` | `editing::Plan` | `style, wishes, targetMs, totalMs, transitionMs, exportPreset, clips[], skipped[]` (why files were not used), `candidates, suggestedTitle`, `notes?` (how the plan was built) |
-| `ExportOptions` | `export::Options` | `fill, transitionMs, transition, color, fade, originalVolume, music{path, library \| null, volume, duck} \| null, titles{title,subtitle,ending,captions}, normalize` |
+| `ExportOptions` | `export::Options` | `fill, transitionMs, transition, color, fade, originalVolume, music{path, library \| null, volume, duck} \| null, titles{title,subtitle,ending,captions}, normalize, share?` |
 | `Track` | `sounds::Track` (sounds.json) | `id, title, artist, moods[], energy, durationMs, url, license, credit` (Rust also has `sha256, sizeBytes, licenseUrl`) |
 | `SoundRecommendation` | `sounds::Recommendation` | `id, score, reasons[]` |
 | `TagScore` | `tagging::TagScore` | `en, vi, score, negative` (negative = bad-shot detector) |
@@ -281,7 +281,7 @@ Local result types (not in api.ts): `ImportResult { imported, ids, failed[]{path
   - `LookAndSound({o, projectId | null, videoMs?, photos?, version, onChange, onError})` (exported; `photos` hides clip sound, ducking and speech subtitles) — Picture: transition length (0 cuts, 300, 500, 700, 800, 1200 ms; other values appended), transition style (`TRANSITIONS`, when length > 0), colour (`COLORS`), fill, fade. Sound: clip sound %, music (library / own file / remove, level, duck), even loudness. Text: opening title, subtitle, ending, speech subtitles.
 - **Commands**: `listClips`, `listJoins`, `listMedia`, `listPhotos`, `getExportOptions`, `setExportOptions`, `moveClip`, `removeClip`, `setClipCaption`, `setClipRange`, `setClipTransition`, `addPhotoClips`, `previewJoin`, `listSounds`, `recommendSounds`, `submitJob("media.export")`, `cancelJob`.
 - **Events**: `job-updated` filtered to `media.export` of this project (exports started from Smart edit appear too).
-- **Actions**: card actions = export-format select (`PRESETS`; sets `fill` for story/reels) + **Export video**; per clip caption, **↑ ↓ Remove**; every Look & sound change saved at once (`setExportOptions`); **Cancel** during export.
+- **Actions**: card actions = export-format select (`PRESETS`; sets `fill` and `share` for story/reels) + **Bản nhẹ để chia sẻ / Light file for sharing** checkbox (`options.share`, ≈ 75 MB per minute) + **Export video**; per clip caption, **↑ ↓ Remove**; every Look & sound change saved at once (`setExportOptions`); **Cancel** during export.
 - **Display**: export progress and report at the top of the card; rows with number, `Thumb`, file, caption, in → out, length; footer "About <total> · rendered from the original files" (estimate: Σ − (n−1) × min(transition, half the shortest clip); the export clamps per join and `auto` varies the length).
 - **Constants**: `PRESETS`, `TRANSITIONS` (`auto` Automatic (by recording time), `fade` Cross dissolve, `fadeblack` Dip to black, `dissolve` Film dissolve (grain), `smoothleft`, `slideleft`, `wipeleft`, `circleopen`), `COLORS`, `AUDIO_EXTENSIONS`, `label`, `minutes(ms)` — all labels bilingual.
 

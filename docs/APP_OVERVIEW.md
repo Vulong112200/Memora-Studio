@@ -420,7 +420,7 @@ Deterministic, with no LLM. Inputs: scenes + scores, tags, transcripts, user mar
 1. **Gather**: media filtered by recording day (date range: whole library, last month / 6 months / year, custom). Skipped files get a reason: "excluded by you", "not analysed yet", "no scene long enough for this style".
 2. **Candidate windows**: scenes shorter than min are dropped. Scenes up to max are used whole. Longer scenes are cut into ideal-length windows.
 3. **Sentence-safe cuts (`fit_speech`)**: transcript lines longer than 3 s + 1 s per word are ignored (Whisper stretches short lines over wind/road noise). An edge that falls inside speech is extended to the whole segment (clip ≤ 3×max, inside the scene), or shrunk to exclude it (clip ≥ min), or the window is dropped. At most 4 iterations.
-4. **Scores**: technical (samples in the window), semantic (0.5 if untagged; otherwise 0.5·top + 0.5·min(1, 2·favoured-concept score)), speech (fraction of the window covered by speech), favorite (0/1). Weighted by the style.
+4. **Scores**: technical (samples in the window), semantic (0.5 if untagged; otherwise 0.5·top + 0.5·min(1, 2·favoured-concept score)), speech (fraction of the window covered by speech), favorite (0/1). Weighted by the style. ★ files are always in the plan (their best moment first, more from long ones; looked at every half clip length) unless nothing in them is usable.
 5. **Bad-shot penalty**: rank × (1 − min(0.8, 2·Σ negative-tag scores)), i.e. up to −80 %.
 6. **Greedy selection** while total + min ≤ target. Overlaps in the same file and duplicate scenes are skipped. Per scene, **per main concept**, at most 1 + scene_ms/60,000 clips (a walk up a path and the tree at its end, in one continuous shot, count separately). A second clip from the same scene needs dHash distance > 12 **or** a different dominant concept.
    Diversity multiplier = 0.85^(same concept) × 0.9^(same file) × 0.6^(same file within 3×ideal).
@@ -559,7 +559,7 @@ Built next to the app (`target\release\memora-cli.exe`). Same data folder (`MEMO
 | Library | `status`, `media`, `concepts`, `scenes MEDIA`, `transcript MEDIA`, `mark MEDIA [--favorite on|off] [--exclude on|off]`, `job KIND [JSON]` |
 | Plans | `styles`, `understand TEXT`, `plan P --request "…"`, `plan P --style ID [--from --to --target --prefer --less --avoid]`, `show-plan P`, `apply P [--keep 0,2,1]` |
 | Timeline | `timeline P`, `clip-add P MEDIA IN OUT`, `clip-trim CLIP IN OUT`, `clip-remove`, `clip-move CLIP ±1`, `clip-caption CLIP TEXT` (seconds) |
-| Output | `options P [--color --transition --transition-ms --fill --fade --normalize --volume --title --subtitle --ending --captions --music --music-library --music-volume --duck]`, `sounds [P]`, `export P [--preset]` |
+| Output | `options P [--color --transition --transition-ms --fill --fade --normalize --share --volume --title --subtitle --ending --captions --music --music-library --music-volume --duck]`, `sounds [P]`, `export P [--preset]` |
 
 ## 16. Measured performance (single runs, indicative, not benchmarks)
 
@@ -617,9 +617,9 @@ Audit status: [IMPROVEMENT_AUDIT.md](IMPROVEMENT_AUDIT.md).
 - Packaging / installer: FFmpeg GPL licence review first, embedded Python worker.
 - Bundled music, subject-aware crop, text animation, GPS, month/year grouping, Whisper GPU experiment.
 
-**Pending owner decisions**
-- OpenVINO telemetry opt-out.
-- Deleting spike artefacts (~1.9 GB in repo build dirs, ~1.6 GB in cache).
+**Decided**
+- OpenVINO telemetry: opted out 2026-11-12 (owner left it to the assistant): consent file `%LOCALAPPDATA%\Intel Corporation\openvino_telemetry` = `0`. Only the dev-time model converter (`ov.convert_model`, `tools/clip-export`) uses it; the app's inference does not.
+- Spike artefacts deleted (2026-11-12 clean-up).
 
 ## 19. Doc / code discrepancies found (not fixed)
 

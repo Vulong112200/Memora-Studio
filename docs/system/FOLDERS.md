@@ -2,7 +2,7 @@
 
 Last verified: 2026-11-09 against commit `9ac182c` + uncommitted changes. Index: [README.md](README.md). Kept current by the `sync-docs` skill.
 
-## 1. Repository (`E:\Memora Studio\`)
+## 1. Repository (`D:\Memora Studio\`)
 
 Code and documents only — never user data or media (data lives under the data root, section 2).
 

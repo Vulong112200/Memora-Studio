@@ -20,5 +20,8 @@
 ## Amendment 2026-11-07 — data root moved to `E:\Memora Data\`
 Supersedes the location in decisions 1 and 10. The project owner partitions drives by purpose: D: ("Software") is for software, E: ("Data") is for data. The data root was moved (copied, verified by file count/bytes and SHA-256 for test media) to `E:\Memora Data\`, outside the repository `E:\Memora Studio\`. Stored media paths in the database were rewritten. Everything else in decisions 1 and 10 is unchanged (user-selectable, nothing on C:, test media in `<data root>\test-media\`).
 
+## Amendment 2026-11-12 — source code moved to `D:\Memora Studio\`
+Owner request: source code is software, so the repository moved from `E:\Memora Studio\` (data drive) to `D:\Memora Studio\` (software drive). Copied with robocopy (32 045 files, 0 failures) without the regenerable `apps\desktop\src-tauri	arget` (rebuilt there). The data root stays `E:\Memora Data\`. Path-dependent pieces: Python venvs keep working after the move (`python.exe` reads `pyvenv.cfg`), but their `Scripts\*.exe` launchers (pip…) still name the old path — use `python -m pip`; the dev worker fallback path is compiled in (`CARGO_MANIFEST_DIR`, `worker::resolve`), so the app and `memora-cli` were rebuilt from the new folder.
+
 ## Deferred
 Stable Windows 11 test machine, antivirus product, background-music source, PySceneDetect decoding path (Phase 4), model downloads (Phase 5).

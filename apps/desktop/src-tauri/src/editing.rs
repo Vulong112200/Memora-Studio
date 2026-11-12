@@ -277,9 +277,10 @@ fn overlap(a0: i64, a1: i64, b0: i64, b1: i64) -> i64 {
     (a1.min(b1) - a0.max(b0)).max(0)
 }
 
-/// Candidate windows inside one scene: the whole scene when it fits the style, else consecutive
-/// `ideal`-length windows (the remainder is dropped when shorter than the minimum).
-fn windows(start: i64, end: i64, st: &Style) -> Vec<(i64, i64)> {
+/// Candidate windows inside one scene: the whole scene when it fits the style, else `ideal`-length windows every
+/// `step` ms (the remainder is dropped when shorter than the minimum). `step` = ideal: consecutive windows;
+/// ★ files use half of it (overlapping windows, so their best moment is not split by the grid).
+fn windows(start: i64, end: i64, st: &Style, step: i64) -> Vec<(i64, i64)> {
     let len = end - start;
     if len < st.clip_min_ms {
         return vec![];
@@ -292,7 +293,10 @@ fn windows(start: i64, end: i64, st: &Style) -> Vec<(i64, i64)> {
     while end - a >= st.clip_min_ms {
         let b = (a + st.clip_ideal_ms).min(end);
         out.push((a, b));
-        a = b;
+        if b == end {
+            break;
+        }
+        a += step.max(1);
     }
     out
 }
@@ -396,7 +400,8 @@ fn candidates(src: &Source, st: &Style, wishes: &Wishes) -> (Vec<Candidate>, usi
         .map_or(vec![], |t| t.segments.iter().filter(|s| s.timing_plausible()).map(|s| (s.start_ms, s.end_ms)).collect());
     for sc in &src.scenes {
         let mut seen = HashSet::new();
-        let fitted = windows(sc.scene.start_ms, sc.scene.end_ms, st)
+        let step = if src.favorite { st.clip_ideal_ms / 2 } else { st.clip_ideal_ms };
+        let fitted = windows(sc.scene.start_ms, sc.scene.end_ms, st, step)
             .into_iter()
             .filter_map(|(a, b)| fit_speech(a, b, &speech, (sc.scene.start_ms, sc.scene.end_ms), st))
             .filter(|w| seen.insert(*w));
@@ -524,7 +529,9 @@ const MAX_CONCEPT_SHARE: f64 = 0.35;
 /// A further clip from an already used scene must show something different, within the per-concept cap.
 fn new_content(c: &Candidate, chosen: &[&Candidate]) -> bool {
     let same_scene: Vec<_> = chosen.iter().filter(|x| x.clip.media_id == c.clip.media_id && x.clip.scene_index == c.clip.scene_index).collect();
-    if same_scene.iter().filter(|x| x.dominant == c.dominant).count() as i64 >= 1 + c.scene_ms / SCENE_MS_PER_CLIP {
+    // ★ files: twice as many moments per long shot (the owner marked them as the ones that matter).
+    let per_clip = if c.clip.scores.favorite > 0.0 { SCENE_MS_PER_CLIP / 2 } else { SCENE_MS_PER_CLIP };
+    if same_scene.iter().filter(|x| x.dominant == c.dominant).count() as i64 >= 1 + c.scene_ms / per_clip {
         return false;
     }
     !same_scene.iter().any(|x| {
@@ -584,6 +591,12 @@ const RECAP_MAX_MS: i64 = 360_000;
 /// every slice of recording time of this length (owner: the trip's forest paths and bridges must be in).
 const COVER_CONCEPT_MS: i64 = 20_000;
 const COVER_SLICE_MS: i64 = 8 * 60_000;
+
+/// ★ files (owner 2026-11-12: "★ clips are always in the recap; look more closely at their scenes"): each gets
+/// its best window before anything else, then one more per this much of its footage (spread over the file) while
+/// those extra ★ clips stay within `FAVORITE_SHARE` of the target. Initial values.
+const FAVORITE_MS_PER_CLIP: i64 = 3 * 60_000;
+const FAVORITE_SHARE: f64 = 0.5;
 
 /// Plan for `st` with the user's wishes (preferred / avoided concepts, length).
 #[cfg(test)]
@@ -652,11 +665,44 @@ pub fn plan_with_photos(st: &Style, sources: &[Source], photos: &[PhotoSource], 
         used.insert((c.clip.media_id, c.clip.scene_index));
     };
     let mut concept_ms: HashMap<String, i64> = HashMap::new();
+    let clean = |c: &&Candidate| !c.clip.reasons.iter().any(|r| r.starts_with('⚠'));
+
+    // ★ files first: the best clean window of each, then more of the long ones, spread over the file.
+    let fav_budget = (st.target_ms as f64 * FAVORITE_SHARE) as i64;
+    let (mut fav_ms, mut fav_files) = (0, 0);
+    for s in sources.iter().filter(|s| s.favorite && !s.excluded && !s.scenes.is_empty()) {
+        let mut got = 0;
+        for k in 0..1 + s.media.probe.duration_ms / FAVORITE_MS_PER_CLIP {
+            let best = pool
+                .iter()
+                .filter(|c| c.clip.media_id == s.media.id && eligible(c, &chosen, &used))
+                .filter(|c| {
+                    let len = c.clip.out_ms - c.clip.in_ms;
+                    total + len <= st.target_ms && (k == 0 || fav_ms + len <= fav_budget)
+                })
+                .map(|c| (c, clean(&c), c.clip.rank * diversity(c, &chosen, st.clip_ideal_ms), distance(c, &chosen)))
+                .max_by(|(a, ca, ra, da), (b, cb, rb, db)| ca.cmp(cb).then(ra.total_cmp(rb)).then(da.cmp(db)).then(b.order.cmp(&a.order)));
+            let Some((c, ..)) = best else { break };
+            take(c, &mut total, &mut concept_ms, &mut used);
+            fav_ms += c.clip.out_ms - c.clip.in_ms;
+            chosen.push(c);
+            got += 1;
+        }
+        let name = s.media.path.rsplit(['\\', '/']).next().unwrap_or(&s.media.path);
+        if got == 0 {
+            skipped.push(format!("★ {name}: no usable moment (every window left out or longer than the video)"));
+        } else {
+            fav_files += 1;
+        }
+    }
+    if fav_files > 0 {
+        let n = chosen.len();
+        notes.push(format!("★ {fav_files} favourite files looked at every {} s: {n} clips", st.clip_ideal_ms / 2000));
+    }
 
     // Coverage first (journey recap): the best clean window of every concept with enough footage, then of every
     // slice of recording time that has none yet, so no part of the trip is left out by stronger repeated scenes.
     if journey {
-        let clean = |c: &&Candidate| !c.clip.reasons.iter().any(|r| r.starts_with('⚠'));
         let mut footage: HashMap<&str, i64> = HashMap::new();
         for c in &pool {
             *footage.entry(c.dominant.as_deref().unwrap_or("")).or_default() += c.clip.out_ms - c.clip.in_ms;
@@ -1000,6 +1046,8 @@ fn suggest_title(clips: &[PlanClip], sources: &[Source]) -> String {
 pub fn styled_options(mut o: crate::export::Options, st: &Style, p: &Plan) -> crate::export::Options {
     let w = &p.wishes;
     o.fill = p.export_preset == "reels";
+    // Story / Reels plans are for social apps: the lighter sharing file (owner 2026-11-12).
+    o.share = matches!(p.export_preset.as_str(), "story" | "reels");
     o.transition_ms = st.transition_ms;
     o.transition = st.transition.into();
     o.color = w.color.clone().unwrap_or_else(|| st.color.into());
@@ -1166,10 +1214,11 @@ mod tests {
     #[test]
     fn windows_follow_style() {
         let st = style("clean_minimal").unwrap(); // 3–5 s, ideal 4 s
-        assert!(windows(0, 2_000, &st).is_empty());
-        assert_eq!(windows(0, 4_500, &st), [(0, 4_500)]);
-        assert_eq!(windows(0, 13_000, &st), [(0, 4_000), (4_000, 8_000), (8_000, 12_000)], "1 s remainder dropped");
-        assert_eq!(windows(0, 15_000, &st).last(), Some(&(12_000, 15_000)), "3 s remainder kept");
+        assert!(windows(0, 2_000, &st, 4_000).is_empty());
+        assert_eq!(windows(0, 4_500, &st, 4_000), [(0, 4_500)]);
+        assert_eq!(windows(0, 13_000, &st, 4_000), [(0, 4_000), (4_000, 8_000), (8_000, 12_000)], "1 s remainder dropped");
+        assert_eq!(windows(0, 15_000, &st, 4_000).last(), Some(&(12_000, 15_000)), "3 s remainder kept");
+        assert_eq!(windows(0, 9_000, &st, 2_000), [(0, 4_000), (2_000, 6_000), (4_000, 8_000), (6_000, 9_000)], "★: every 2 s");
     }
 
     #[test]
@@ -1210,6 +1259,27 @@ mod tests {
         let talk = p.clips.iter().find(|c| c.media_id == 2 && c.in_ms == 0).unwrap();
         assert!(talk.scores.speech > 0.8 && talk.scores.favorite == 1.0 && talk.reasons.iter().any(|r| r == "favorite"));
         assert_eq!(p.total_ms, p.clips.iter().map(|c| c.out_ms - c.in_ms).sum::<i64>() - (p.clips.len() as i64 - 1) * 600);
+    }
+
+    #[test]
+    fn favourites_always_appear_and_long_ones_are_looked_at_closely() {
+        let st = style("clean_minimal").unwrap(); // 60 s target, 3–5 s clips
+        let mut sources: Vec<Source> = (1..=3).map(|i| src(media(i, "2026-02-20", 300_000), vec![scene(i, 0, 0, 300_000, 0.95)])).collect();
+        let fav = |s: Source| Source { favorite: true, ..s };
+        sources.push(fav(src(media(4, "2026-02-21", 60_000), vec![scene(4, 0, 0, 60_000, 0.05)]))); // weak but ★
+        sources.push(fav(src(media(5, "2026-02-22", 420_000), vec![scene(5, 0, 0, 420_000, 0.05)]))); // 7 min ★
+        sources.push(fav(src(media(6, "2026-02-23", 2_000), vec![scene(6, 0, 0, 2_000, 0.9)]))); // too short for any clip
+        sources.push(Source { excluded: true, ..fav(src(media(7, "2026-02-24", 60_000), vec![scene(7, 0, 0, 60_000, 0.9)])) });
+        let p = plan(&st, &sources);
+        let of = |m: i64| p.clips.iter().filter(|c| c.media_id == m).collect::<Vec<_>>();
+        assert!(!of(4).is_empty(), "a weak ★ file still appears");
+        let long = of(5);
+        assert!(long.len() >= 3, "1 + one per 3 min of a 7 min ★ file: {}", long.len());
+        assert!(long.windows(2).all(|w| w[1].in_ms - w[0].out_ms >= 60_000), "spread over the file: {:?}", long.iter().map(|c| c.in_ms).collect::<Vec<_>>());
+        assert!(of(7).is_empty(), "exclusion beats ★");
+        assert!(p.skipped.iter().any(|s| s.contains("★ v6.mp4: no usable moment")), "{:?}", p.skipped);
+        assert!(p.notes.iter().any(|n| n.starts_with("★ 2 favourite files")), "{:?}", p.notes);
+        assert!(p.total_ms <= st.target_ms);
     }
 
     #[test]

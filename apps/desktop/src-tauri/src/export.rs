@@ -103,6 +103,9 @@ pub struct Options {
     pub titles: Titles,
     /// EBU R128 loudness normalisation to −16 LUFS (typical for phones / social media).
     pub normalize: bool,
+    /// Lighter file for sharing (Story / Reels / chat): video capped at `SHARE_VIDEO_BITRATE` instead of the
+    /// archive-grade constant quality; the file name ends in `-share`.
+    pub share: bool,
     /// Licence credit burned in at the end (set by the export job for library music).
     #[serde(skip)]
     pub credit: Option<String>,
@@ -118,11 +121,16 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             fill: false, transition_ms: 0, transition: "fade".into(), color: "none".into(), fade: false,
-            original_volume: 1.0, music: None, titles: Titles::default(), normalize: false, credit: None, intermediate: false,
-            fixed_joins: None,
+            original_volume: 1.0, music: None, titles: Titles::default(), normalize: false, share: false, credit: None,
+            intermediate: false, fixed_joins: None,
         }
     }
 }
+
+/// Video bitrate of a sharing export (`Options::share`). Measured on the 46 s 1080×1920 Nam Cát Tiên reel
+/// (forest, motion): 218 MB → 55 MB, SSIM 0.954 (QSV) / 0.958 (libx264) against the archive export; 12 Mbit/s
+/// gave 0.962 for 66 MB, 6 Mbit/s 0.93. Social apps re-encode uploads to less than this anyway.
+const SHARE_VIDEO_BITRATE: &str = "10M";
 
 /// Saved export options of a project (look, music, titles); defaults when never saved.
 pub fn load_options(c: &rusqlite::Connection, project_id: i64) -> Options {
@@ -559,9 +567,12 @@ pub fn build_args(segs: &[Segment], decode: Decode, encoder: Encoder, (w, h, fps
 
     args.extend(os(&["-filter_complex", &graph, "-map", "[v]", "-map", "[a]", "-t", &secs(total)]));
     let (q, crf, audio) = if o.intermediate { ("16", "14", "320k") } else { ("22", "20", "192k") };
-    args.extend(match encoder {
-        Encoder::Qsv => os(&["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", q]),
-        Encoder::X264 => os(&["-c:v", "libx264", "-preset", "medium", "-crf", crf]),
+    args.extend(match (encoder, o.share && !o.intermediate) {
+        (Encoder::Qsv, false) => os(&["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", q]),
+        (Encoder::X264, false) => os(&["-c:v", "libx264", "-preset", "medium", "-crf", crf]),
+        // Sharing: QSV VBR around the bitrate; libx264 keeps its constant quality but is capped at it.
+        (Encoder::Qsv, true) => os(&["-c:v", "h264_qsv", "-preset", "medium", "-b:v", SHARE_VIDEO_BITRATE, "-maxrate", "15M", "-bufsize", "20M"]),
+        (Encoder::X264, true) => os(&["-c:v", "libx264", "-preset", "medium", "-crf", "21", "-maxrate", SHARE_VIDEO_BITRATE, "-bufsize", "20M"]),
     });
     args.extend(os(&["-c:a", "aac", "-b:a", audio, "-movflags", "+faststart", "-f", "mp4"]));
     args
@@ -876,7 +887,8 @@ pub fn export_job(
     };
     tracing::info!(project_id, photos, "project export");
     let scaled = |d: u64, t: u64| progress(share + d * (1000 - share) / t.max(1), 1000);
-    let outcome = finish(env, &segs, target, preset_name, o, output_path(projects, project_id, &name, preset_name), &scaled, cancelled);
+    let label = if o.share { format!("{preset_name}-share") } else { preset_name.to_string() };
+    let outcome = finish(env, &segs, target, preset_name, o, output_path(projects, project_id, &name, &label), &scaled, cancelled);
     drop(stills);
     outcome
 }
@@ -1179,6 +1191,20 @@ mod tests {
     }
 
     #[test]
+    fn sharing_export_caps_the_bitrate() {
+        let args = |enc, o: &Options| -> String {
+            build_args(&[seg(0, 2_000, None, &[])], Decode::Software, enc, (1080, 1920, 30.0), o, None)
+                .into_iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ")
+        };
+        let share = Options { share: true, ..Options::default() };
+        assert!(args(Encoder::Qsv, &Options::default()).contains("-global_quality 22"), "archive quality by default");
+        assert!(args(Encoder::Qsv, &share).contains("-b:v 10M -maxrate 15M"));
+        assert!(args(Encoder::X264, &share).contains("-crf 21 -maxrate 10M"));
+        let part = Options { intermediate: true, ..share };
+        assert!(args(Encoder::X264, &part).contains("-crf 14"), "parts of a long timeline stay high quality");
+    }
+
+    #[test]
     fn storage_errors_are_not_retried() {
         assert!(storage_error("FFmpeg exited with exit code: 1: av_interleaved_write_frame(): No space left on device"));
         assert!(storage_error("Cannot write E:\\x.mp4: Access is denied. (os error 5)"));
@@ -1252,7 +1278,7 @@ mod tests {
             fill: true, transition_ms: 400, transition: "dissolve".into(), color: "cinematic".into(), fade: true,
             original_volume: 0.8, music: Some(Music { path: music.to_string_lossy().into(), library: None, volume: 0.5, duck: true }),
             titles: Titles { title: "Đà Lạt – Tháng Hai".into(), subtitle: "Đạp xe".into(), ending: "Hẹn gặp lại".into(), captions: true },
-            normalize: true, credit: None, intermediate: false, fixed_joins: None,
+            normalize: true, share: false, credit: None, intermediate: false, fixed_joins: None,
         };
         assert!(look.check().is_ok());
         assert_eq!((look.joins(&segs), look.duration(&segs)), (vec![("dissolve".to_string(), 400)], 2100));

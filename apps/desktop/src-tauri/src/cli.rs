@@ -38,7 +38,7 @@ Timeline (times in seconds)
   clip-caption CLIP TEXT          empty text clears it
 Look, sound, export
   options PROJECT [--color C] [--transition T] [--transition-ms N] [--fill on|off] [--fade on|off]
-                  [--normalize on|off] [--volume 0..2] [--title T] [--subtitle T] [--ending T]
+                  [--normalize on|off] [--share on|off] [--volume 0..2] [--title T] [--subtitle T] [--ending T]
                   [--captions on|off] [--music FILE|none] [--music-library ID] [--music-volume 0..2] [--duck on|off]
   sounds [PROJECT]                free music library (+ suggestions for the project)
   export PROJECT [--preset landscape|story|reels|archive]
@@ -474,8 +474,8 @@ fn show_options(o: &export::Options) -> String {
         None => "none".into(),
     };
     format!(
-        "look: {} {} ms {}, colour {}, fill {}, fade {}, normalize {}, own sound {:.2}\nmusic: {music}\ntext: title \"{}\" subtitle \"{}\" ending \"{}\" subtitles {}\n",
-        o.transition, o.transition_ms, if o.transition_ms == 0 { "(cuts)" } else { "" }, o.color, o.fill, o.fade, o.normalize,
+        "look: {} {} ms {}, colour {}, fill {}, fade {}, normalize {}, share {}, own sound {:.2}\nmusic: {music}\ntext: title \"{}\" subtitle \"{}\" ending \"{}\" subtitles {}\n",
+        o.transition, o.transition_ms, if o.transition_ms == 0 { "(cuts)" } else { "" }, o.color, o.fill, o.fade, o.normalize, o.share,
         o.original_volume, o.titles.title, o.titles.subtitle, o.titles.ending, o.titles.captions
     )
 }
@@ -489,6 +489,7 @@ fn set_options(o: &mut export::Options, flags: &HashMap<String, String>) -> Resu
             "fill" => o.fill = on(v)?,
             "fade" => o.fade = on(v)?,
             "normalize" => o.normalize = on(v)?,
+            "share" => o.share = on(v)?,
             "volume" => o.original_volume = num(v)?,
             "title" => o.titles.title = v.clone(),
             "subtitle" => o.titles.subtitle = v.clone(),
