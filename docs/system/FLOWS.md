@@ -1,6 +1,6 @@
 # Processing flows
 
-Last verified: 2026-11-11 against commit `9ac182c` + uncommitted changes. Index: [README.md](README.md). Kept current by the `sync-docs` skill.
+Last verified: 2026-11-12 against commit `7eeb0bd` + uncommitted changes. Index: [README.md](README.md). Kept current by the `sync-docs` skill.
 
 What happens, step by step, when the app starts or the user does something. Function names are
 `module::function` in `apps/desktop/src-tauri/src/` (details in [BACKEND.md](BACKEND.md)); UI files are in
@@ -62,8 +62,8 @@ FFmpeg extracts 16 kHz mono WAV from the **original** → `whisper-cli -oj -np -
 1. `EditingPlan.tsx` request box: while typing (250 ms pause) `interpret_request(text)` → `request::parse(text, lib::vocabulary)` → "Understood: …" chips (or a hint listing words that work). Offline keywords only.
 2. "Make a plan" → `generate_plan(projectId, style, from, to, request)` → `lib::make_plan`:
    - parse the request; its style and dates (if any) replace the selection; its wishes go into `editing::Wishes` (prefer / less / avoid concepts, length, preset, colour, title, ending, subtitles, music, request text);
-   - `editing::gather(from, to)`: library files recorded in the range, with scored scenes, tags, transcript, marks (★ / ⊘);
-   - `editing::plan_with(style, sources, wishes)`:
+   - `editing::gather(from, to)`: library files recorded in the range, with scored scenes, tags, transcript, marks (★ / ⊘); `editing::gather_photos(from, to)`: library photos taken in the range with their analysis;
+   - `editing::plan_with_photos(style, sources, photos, wishes)` (photos: see §20):
      1. skip excluded / unanalysed files (reason in `skipped`);
      2. candidate windows per scene (whole scene if ≤ max, else ideal-length windows); windows where the camera points down at the handlebars / ground ("view ahead" cue < 0.1, model v3) are left out and counted, except on a forest trail (model v4 cue ≥ 0.9), where a small bridge / slope / forest trail becomes the clip's concept; `journey_recap` picks its length from the footage when none is asked and first takes one clip per scene type and per 8 min of recording time; transcript lines with implausible timing (> 3 s + 1 s per word: Whisper stretched them over noise) are ignored; `fit_speech` moves edges out of the remaining sentences (extend ≤ 3× max, else shrink, else drop; ≤ 4 passes);
      3. windows showing an avoided concept (score ≥ 0.25) are left out and counted;
@@ -80,12 +80,15 @@ FFmpeg extracts 16 kHz mono WAV from the **original** → `whisper-cli -oj -np -
 
 ## 10. Manual timeline editing
 
-Media library preview (proxy) → "Set In" / "Set Out" → `add_clip`; scene / transcript click sets In/Out. Timeline card: `set_clip_caption` (on blur), `move_clip ±1`, `remove_clip`; Look & sound panel → `set_export_options` on every change (checked by `Options::check`). CLI adds `clip-trim` (`timeline::set_range`).
+Media library preview (proxy) → "Set In" / "Set Out" → `add_clip`; scene / transcript click sets In/Out. Timeline card (step 3):
+- **Strip** (visual timeline): one block per clip (width from its length, 🖼 = photo) and a chip at every join with the length from `list_joins` (= `export::timeline_joins`: project transition, per-clip choices, clamped; amber = set on that join). Click a chip → join panel: style (`Project setting` clears it, or one of `TRANSITIONS`) and length (0–2 s) → `set_clip_transition(clip after the join)`; **▶ Preview this join** → `preview_join(projectId, index, preset)` → a few seconds around the join at half size (proxies) played in a `<video>`.
+- **+ Add photos…** → photo picker (library photos, click order, seconds per photo) → `add_photo_clips`. Photo rows: seconds select → `set_clip_range(id, 0, ms)`; **Edit photo** → `memora:open-photo` event → App opens the Photos page with that photo selected (`memora.photo`).
+- Rows: `set_clip_caption` (on blur), `move_clip ±1`, `remove_clip`; Look & sound panel → `set_export_options` on every change (checked by `Options::check`), then joins reloaded. Total = clip lengths − joins. CLI adds `clip-trim` (`timeline::set_range`); CLI `timeline` lists each join (`↳ name s`, "set on this clip").
 
 ## 11. Export
 
 `submit_job("media.export", {projectId, preset, options})` → `export::export_job`:
-1. Load project name + timeline clips + media + transcripts; fail if empty or **any original file is missing** (never a proxy fallback); `Options::check`.
+1. Load project name + timeline clips + media + transcripts; fail if empty or **any original file (video or photo) is missing** (never a proxy fallback); photo clips rendered with their edits by the job worker (`photos::still`, 2880 px, `cache\render\still-*.jpg`, deleted afterwards); each clip's own transition kept on its segment; `Options::check`.
 2. Library music: `sounds::fetch` uses `music\<id>.mp3` when it passes the size + SHA-256 check, else downloads it there once (kept); credit line added.
 3. `export::render` → staging file `<name>-<preset>-<unix>.unvalidated.mp4` via `.part`: `hybrid-qsv` then `libx264` (no retry on disk-full / permission errors); filter graph: trim, fit / fill / blurred background, xfade, colour look, fades, ASS titles/captions/subtitles (temporary file in `cache\render`), clip volume, music (+ ducking), loudnorm. Timelines over 10 clips: parts of ≤ 10 clips rendered from the originals into `cache\render` (picture, own sound, transitions), then one pass joins them with the same transition and adds look, text, music and loudness (bounds FFmpeg memory; parts deleted afterwards).
 4. `level_loudness` (when normalise is on): measure → exact gain ±12 dB + limiter.
@@ -124,8 +127,19 @@ App exit or crash: the Job Object kills every child. Next start: `reconcile` (§
 
 ## 17. Music suggestions
 
-`recommend_sounds(projectId)` / CLI `sounds P` → `lib::recommend_for`: plan style, on-screen concepts of the timeline clips (weighted by length), timeline length and speech share → `sounds::recommend` (style fit 50 %, content 30 %, length 10 %, talk-friendliness 10 %).
+Photo video: `recommend_sounds(null, videoMs)` → `sounds::recommend("memory_nostalgia", no tags, length, no speech)`; the first time the panel opens the top track is pre-selected (changeable). Project: `recommend_sounds(projectId)` / CLI `sounds P` → `lib::recommend_for`: plan style, on-screen concepts of the timeline clips (weighted by length), timeline length and speech share → `sounds::recommend` (style fit 50 %, content 30 %, length 10 %, talk-friendliness 10 %).
 
 ## 18. Edit a photo (ADR 0006, slice B1)
 
-Photos page (`PhotoEditor.tsx`) "+ Add photos" (file dialog, `photos::EXTENSIONS`) → `import_photos(paths)` → `photos::import`: row (`upsert`, edits kept) → photo worker `photo_render` 480 px thumbnail + EXIF date → `set_info`. Select a photo → sliders change the edit stack → after 80 ms `preview_photo(id, edits, showMask, false)` (one request in flight, latest wins) → photo worker renders ≤ 1600 px to a new `preview-<n>.jpg` → shown. 500 ms after the last change `set_photo_edits` saves it (each save is one undo step). **Auto** → `auto_photo(id)` → suggested values merged onto the sliders. **Hold: original** → `preview_photo(…, before = true)` (`before.jpg`, once). **Show sky area** → the sky mask overlaid in pink. **Export photo** → `set_photo_edits` then `export_photo(id)` → full-size render to `photos\exports\<name>-edit[-N].jpg` (`.part` + rename); the original is never written. Remove (✕ on a thumbnail, confirm) → row and cache folder deleted, file kept.
+Photos page (`PhotoEditor.tsx`) "+ Add photos" (file dialog, `photos::EXTENSIONS`) → `import_photos(paths)` → `photos::import`: row (`upsert`, edits kept) → photo worker `photo_render` 480 px thumbnail + EXIF date → `set_info`. Select a photo → sliders change the edit stack → after 80 ms `preview_photo(id, edits, showMask, false)` (one request in flight, latest wins) → photo worker renders ≤ 1600 px to a new `preview-<n>.jpg` → shown. 500 ms after the last change `set_photo_edits` saves it (each save is one undo step). **Auto** → `auto_photo(id)` → suggested values merged onto the sliders. **Hold: original** → `preview_photo(…, before = true)` (`before.jpg`, once). **Show sky area** → the sky mask overlaid in pink. **Export photo** → `set_photo_edits` then `export_photo(id)` → full-size render to `photos\exports\<name>-edit[-N].jpg` (`.part` + rename); the original is never written. Remove (✕ on a thumbnail, confirm) → row and cache folder deleted, file kept. Opening the Photos page submits `media.photo_analyze` for photos not analysed yet (once per visit; the list reloads when it finishes).
+
+## 19. Video from photos
+
+Photos page **🎬 Make a video** → clicking thumbnails picks photos in order (number badge); **All photos** / **Sort by date taken** / **Clear**. The timeline strip shows each photo (number, seconds; ◀ ✕ ▶ to move or leave out) and the transition between photos. Settings: seconds per photo, format (`PRESETS`), file name, and the project's Look & sound panel without clip sound / ducking / speech subtitles (transition, colour, fill, fades, music, loudness, titles); kept in `localStorage` `memora.photoVideo`. **Create video** → `submit_job("media.photo_video", {photoIds, photoMs, preset, options, name})` → `photos::video_job`: each photo rendered with its edits (worker `photo_render`, 2880 px) into `cache\render\` → still segments → `export::finish` (library music, render, loudness, validation) → `photos\exports\<name>-<preset>[-N].mp4`, stills deleted. Progress and the validation report shown under the panel; photos are never written.
+
+## 20. Photos in Smart edit (2026-11-12)
+
+1. Photos page → `media.photo_analyze` for photos without observations → `photos::analyze_job` → worker `photo_analyze` (edited photo at 960 px: frame metrics + OpenCLIP tags / cues) → `photo_analysis`.
+2. "Make a plan" → `lib::make_plan` → `editing::gather_photos` → `plan_with_photos`: photos taken during the trip (recording span of the analysed videos ± 3 h) that are not blurry / dark / overexposed / a bad shot / an avoided concept, one per near-identical picture, up to 25 % of the length (request "ít ảnh" 12 %, "nhiều ảnh" 40 %, "chỉ video" none), spread over the trip; each shown 4 s ("mỗi ảnh N giây"); placed after the last clip recorded before it was taken. Plan notes say how many were used and why others were not.
+3. The plan card shows photo rows (🖼, seconds); "Use this plan" → `editing::apply` → `timeline::add_photo` for photo clips; export renders them with their edits (§11).
+

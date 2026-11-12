@@ -51,15 +51,46 @@ def compile_model(xml, devices):
     raise RuntimeError("No device could run the model: " + "; ".join(errors))
 
 
-def tag_video(path, model_dir, every_ms=2000, devices=("GPU", "CPU"), progress=None, check_cancel=None):
-    model_dir = Path(model_dir)
-    meta = json.loads((model_dir / "openclip_tags.json").read_text(encoding="utf-8"))
-    text = np.array([t["embedding"] for t in meta["tags"]], np.float32)
-    scale = float(meta["logitScale"])
-    cues = meta.get("cues", [])  # v3+: camera cues, each a prompt and its contrast
-    cue_pairs = [np.array([c["embedding"], c["contrast"]], np.float32) for c in cues]
-    model, device, fallbacks = compile_model(model_dir / "openclip_image.xml", devices)
+class Tagger:
+    """The image encoder compiled once plus the tag / cue embeddings of one model folder."""
 
+    def __init__(self, model_dir, devices=("GPU", "CPU")):
+        model_dir = Path(model_dir)
+        self.meta = json.loads((model_dir / "openclip_tags.json").read_text(encoding="utf-8"))
+        self.text = np.array([t["embedding"] for t in self.meta["tags"]], np.float32)
+        self.scale = float(self.meta["logitScale"])
+        self.cues = self.meta.get("cues", [])  # v3+: camera / scene cues, each a prompt and its contrast
+        self.cue_pairs = [np.array([c["embedding"], c["contrast"]], np.float32) for c in self.cues]
+        self.model, self.device, self.fallbacks = compile_model(model_dir / "openclip_image.xml", devices)
+
+    def sample(self, bgr, at_ms):
+        v = self.model(preprocess(bgr, self.meta["preprocess"]))[0][0]
+        v = v / np.linalg.norm(v)
+        logits = self.text @ v * self.scale
+        prob = np.exp(logits - logits.max())
+        prob /= prob.sum()
+        top = prob.argsort()[::-1][:TOP_K]
+        return {"atMs": at_ms, "tags": [[int(k), round(float(prob[k]), 4)] for k in top],
+                "cues": [round(cue_score(pair, v, self.scale), 4) for pair in self.cue_pairs]}
+
+    def result(self, samples, every_ms, seconds):
+        return {
+            "model": self.meta["model"], "device": self.device, "fallbacks": self.fallbacks, "everyMs": every_ms,
+            "seconds": round(seconds, 2),
+            "tags": [{"en": t["en"], "vi": t["vi"], "negative": bool(t.get("negative"))} for t in self.meta["tags"]],
+            "cues": [{"en": c["en"], "vi": c["vi"]} for c in self.cues],
+            "samples": samples,
+        }
+
+
+def tag_image(bgr, model_dir, devices=("GPU", "CPU")):
+    """Same result shape as tag_video with one sample at 0 ms (photos)."""
+    t0, tagger = time.perf_counter(), Tagger(model_dir, devices)
+    return tagger.result([tagger.sample(bgr, 0)], 0, time.perf_counter() - t0)
+
+
+def tag_video(path, model_dir, every_ms=2000, devices=("GPU", "CPU"), progress=None, check_cancel=None):
+    tagger = Tagger(model_dir, devices)
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open {path}")
@@ -73,24 +104,11 @@ def tag_video(path, model_dir, every_ms=2000, devices=("GPU", "CPU"), progress=N
         ok, frame = cap.read()
         if not ok:
             continue
-        v = model(preprocess(frame, meta["preprocess"]))[0][0]
-        v = v / np.linalg.norm(v)
-        logits = text @ v * scale
-        prob = np.exp(logits - logits.max())
-        prob /= prob.sum()
-        top = prob.argsort()[::-1][:TOP_K]
-        samples.append({"atMs": at, "tags": [[int(k), round(float(prob[k]), 4)] for k in top],
-                        "cues": [round(cue_score(pair, v, scale), 4) for pair in cue_pairs]})
+        samples.append(tagger.sample(frame, at))
         if progress:
             progress(i + 1, len(times))
     cap.release()
-    return {
-        "model": meta["model"], "device": device, "fallbacks": fallbacks, "everyMs": every_ms,
-        "seconds": round(time.perf_counter() - t0, 2),
-        "tags": [{"en": t["en"], "vi": t["vi"], "negative": bool(t.get("negative"))} for t in meta["tags"]],
-        "cues": [{"en": c["en"], "vi": c["vi"]} for c in cues],
-        "samples": samples,
-    }
+    return tagger.result(samples, every_ms, time.perf_counter() - t0)
 
 
 def cue_score(pair, v, scale):

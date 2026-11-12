@@ -136,6 +136,8 @@ export interface PlanClip {
   rank: number;
   tags: string[];
   reasons: string[];
+  /** A still photo (`mediaId` is then −photo id). */
+  photoId?: number | null;
 }
 
 /** The user's requests on top of a style (editing.rs `Wishes`); concept names are tag `en` names. */
@@ -150,6 +152,9 @@ export interface Wishes {
   ending: string | null;
   captions: boolean | null;
   music: string | null;
+  /** "none" | "fewer" | "yes" | "more"; null = photos used when there are some. */
+  photos?: string | null;
+  photoMs?: number | null;
   request: string;
 }
 
@@ -215,7 +220,9 @@ export interface Track {
 }
 export interface SoundRecommendation { id: string; score: number; reasons: string[] }
 export const listSounds = () => invoke<Track[]>("list_sounds");
-export const recommendSounds = (projectId: number) => invoke<SoundRecommendation[]>("recommend_sounds", { projectId });
+/** `projectId` null = a photo video of `videoMs` (no tags or speech to match). */
+export const recommendSounds = (projectId: number | null, videoMs?: number) =>
+  invoke<SoundRecommendation[]>("recommend_sounds", { projectId, videoMs: videoMs ?? null });
 
 export const setClipCaption = (id: number, caption: string) => invoke<void>("set_clip_caption", { id, caption });
 
@@ -234,15 +241,22 @@ export interface Transcript {
 export const getTranscript = (mediaId: number) => invoke<Transcript | null>("get_transcript", { mediaId });
 
 /** Trimmed segment on a project timeline (src-tauri/src/timeline.rs). */
+/** Timeline clip: a video segment (`mediaId`) or a still photo (`photoId`, shown `outMs - inMs`). */
 export interface Clip {
   id: number;
   projectId: number;
-  mediaId: number;
+  mediaId: number | null;
+  photoId: number | null;
   position: number;
   inMs: number;
   outMs: number;
   caption: string | null;
+  /** Transition into this clip; null = the project's transition. */
+  transition: string | null;
+  transitionMs: number | null;
 }
+/** One join as exported: [xfade name, ms]. */
+export type Join = [string, number];
 
 export type ExportPreset = "landscape" | "story" | "reels" | "archive";
 
@@ -262,6 +276,14 @@ export const addClip = (projectId: number, mediaId: number, inMs: number, outMs:
   invoke<Clip>("add_clip", { projectId, mediaId, inMs, outMs });
 export const removeClip = (id: number) => invoke<void>("remove_clip", { id });
 export const moveClip = (id: number, delta: number) => invoke<void>("move_clip", { id, delta });
+export const addPhotoClips = (projectId: number, photoIds: number[], ms?: number) =>
+  invoke<Clip[]>("add_photo_clips", { projectId, photoIds, ms: ms ?? null });
+export const setClipRange = (id: number, inMs: number, outMs: number) => invoke<Clip>("set_clip_range", { id, inMs, outMs });
+export const setClipTransition = (id: number, transition: string | null, transitionMs: number) =>
+  invoke<Clip>("set_clip_transition", { id, transition, transitionMs });
+export const listJoins = (projectId: number) => invoke<Join[]>("list_joins", { projectId });
+/** Low-resolution render of a few seconds around join `index` (cache file). */
+export const previewJoin = (projectId: number, index: number, preset: ExportPreset) => invoke<string>("preview_join", { projectId, index, preset });
 
 /** Model manifest + install state (src-tauri/src/models.rs, models.json). */
 export interface ModelInfo {
@@ -333,6 +355,8 @@ export interface Photo {
   edits: PhotoEdits | null;
   importedAt: string;
   thumb: string | null;
+  /** Observations stored (job `media.photo_analyze`): Smart edit can use it. */
+  analyzed: boolean;
 }
 export interface PhotoImport { ids: number[]; failed: { path: string; error: string }[] }
 export const listPhotos = () => invoke<Photo[]>("list_photos");

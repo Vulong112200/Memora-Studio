@@ -2,7 +2,7 @@
 
 SQLite schema, migrations, backups, and which Rust code reads and writes each table and JSON column.
 
-Last verified: 2026-11-11 against commit `9ac182c` + uncommitted changes. Index: [README.md](README.md). Kept current by the `sync-docs` skill ([.claude/skills/sync-docs](../../.claude/skills/sync-docs/SKILL.md)).
+Last verified: 2026-11-12 against commit `7eeb0bd` + uncommitted changes. Index: [README.md](README.md). Kept current by the `sync-docs` skill ([.claude/skills/sync-docs](../../.claude/skills/sync-docs/SKILL.md)).
 
 Sources: [db.rs](../../apps/desktop/src-tauri/src/db.rs), plus every module that runs SQL:
 [projects.rs](../../apps/desktop/src-tauri/src/projects.rs), [media.rs](../../apps/desktop/src-tauri/src/media.rs),
@@ -74,6 +74,8 @@ Sources: [db.rs](../../apps/desktop/src-tauri/src/db.rs), plus every module that
 | 8 | Tables `media_marks` (PK media_id, `favorite`, `excluded`) and `editing_plans` (PK project_id, `style`, `plan_json`) | Editing Core |
 | 9 | Column `project_clips.caption TEXT`; table `project_settings` (PK project_id, `export_json`) | Per-clip captions, per-project export options |
 | 10 | Table `photos` (path `UNIQUE COLLATE NOCASE`, size, mtime, width, height, `taken_at`, `edits_json`, `imported_at`) | Photo editor (ADR 0006); edit stack in the same row |
+| 12 | Table `photo_analysis` (`photo_id` PK FK photos CASCADE, `metrics_json`, `tags_json`, `model_id`, `created_at`) | Photos in Smart edit: quality + OpenCLIP observations of the edited photo |
+| 11 | `project_clips` rebuilt through `project_clips_new` (copy, drop, rename, index again): `media_id` nullable, new `photo_id` (FK photos ON DELETE CASCADE), CHECK exactly one of the two, `transition`, `transition_ms` | Mixed timeline (videos + photos) and a transition per join (owner 2026-11-12); existing clips keep id, order, range and caption |
 
 ## 3. Tables
 
@@ -118,17 +120,22 @@ All timestamps are TEXT, RFC 3339 UTC with milliseconds, default `now`.
 - **R**: `media::list` (`lib::list_media`, `editing::gather`, `cli::status`, `cli::list_media`, `cli::names`), `media::get` (proxy/analyze/tag/transcribe/export jobs, `cli::scenes`), `media::import_one` (previous `size`, `modified_unix`), `timeline::add` / `timeline::set_range` (`duration_ms` to clamp Out).
 - `probe_json` and `modified_unix` are not part of `media::COLUMNS`; `probe_json` is written but no code reads it back.
 
-### project_clips (migrations 3, 9)
+### project_clips (migrations 3, 9, 11)
+
+Rebuilt by migration 11 (temporary name `project_clips_new`). Table CHECK: `(media_id IS NULL) <> (photo_id IS NULL)` — a clip is a video segment or a still photo.
 
 | Column | Type | Constraints | Meaning |
 |---|---|---|---|
 | id | INTEGER | PK | |
 | project_id | INTEGER | NOT NULL, FK projects ON DELETE CASCADE | |
-| media_id | INTEGER | NOT NULL, FK media ON DELETE CASCADE | |
+| media_id | INTEGER | FK media ON DELETE CASCADE (nullable since 11) | Video clip |
+| photo_id | INTEGER | FK photos ON DELETE CASCADE (11) | Photo clip (rendered with its edit stack at export) |
 | position | INTEGER | NOT NULL | Order; new clip = `MAX(position)+1` (0 first) |
-| in_ms | INTEGER | NOT NULL, CHECK `in_ms >= 0` | Times in the ORIGINAL file |
-| out_ms | INTEGER | NOT NULL, CHECK `out_ms > in_ms` | Rust also clamps to `media.duration_ms` and requires ≥ 100 ms |
+| in_ms | INTEGER | NOT NULL, CHECK `in_ms >= 0` | Times in the ORIGINAL file; 0 for a photo |
+| out_ms | INTEGER | NOT NULL, CHECK `out_ms > in_ms` | Rust clamps to `media.duration_ms` (video) or `timeline::PHOTO_MS` 1–20 s (photo) and requires ≥ 100 ms |
 | caption | TEXT | (migration 9) | Lower-third text, ≤ 200 chars, NULL when empty |
+| transition | TEXT | (11) | Transition INTO this clip, one of `export::TRANSITIONS`; NULL = the project's transition (`project_settings.export_json`) |
+| transition_ms | INTEGER | CHECK `>= 0` (11) | Its length, 0..3000 ms (0 = hard cut); NULL when `transition` is NULL |
 
 - Index `project_clips_project (project_id, position)`.
 - **W**: `timeline::add` (`lib::add_clip`, `editing::apply`, `cli "clip-add"`), `timeline::set_range` (`cli "clip-trim"`), `timeline::set_caption` (`lib::set_clip_caption`, `cli "clip-caption"`), `timeline::remove` (`lib::remove_clip`, `cli "clip-remove"`), `timeline::move_clip` (swaps `position` with the neighbour in a transaction; `lib::move_clip`, `cli "clip-move"`), `editing::apply` (deletes the project's clips, then re-adds the kept plan clips in one transaction; `lib::apply_plan_to` ← `lib::apply_plan`, `cli "apply"`).
@@ -317,13 +324,26 @@ All timestamps are TEXT, RFC 3339 UTC with milliseconds, default `now`.
 | size | INTEGER | NOT NULL | Bytes at import |
 | modified_unix | INTEGER | | File modified time at import |
 | width, height | INTEGER | | Displayed size (EXIF orientation applied), set after the thumbnail render |
-| taken_at | TEXT | | EXIF DateTimeOriginal `YYYY-MM-DDTHH:MM:SS` (camera local time), else file time `…Z` |
+| taken_at | TEXT | | EXIF DateTimeOriginal with its zone `YYYY-MM-DDTHH:MM:SS+07:00` (OffsetTimeOriginal, else this PC's offset; since 2026-11-12, older imports have no zone = read as UTC), else file time `…Z` |
 | edits_json | TEXT | | Edit stack (object) or NULL; keys of `photo.py` (`exposure`, `contrast`, `highlights`, `shadows`, `whites`, `blacks`, `temperature`, `tint`, `vibrance`, `saturation`, `clarity`, `dehaze`, `sharpen`, `denoise`, `sky`, `skyWarmth`, `vignette`, `straighten` = numbers −100..100 (straighten ±15°), `rotate` 0/90/180/270, `crop` `free|1:1|4:5|3:2|16:9|9:16`, `look` = one of `photo.LOOKS`, `hsl` = `{band: [hue, sat, light]}`) |
 | imported_at | TEXT | NOT NULL, default now | |
 
 - **W**: `photos::upsert` / `set_info` (← `photos::import`, `lib::import_photos`), `photos::set_edits` (`lib::set_photo_edits`), `photos::remove` (`lib::remove_photo`).
 - **R**: `photos::list` (`lib::list_photos`), `photos::get` (preview, auto, export commands).
-- No foreign keys; no other table refers to photos.
+- No foreign keys of its own; `project_clips.photo_id` and `photo_analysis.photo_id` refer to it (ON DELETE CASCADE).
+
+### photo_analysis (migration 12)
+
+| Column | Type | Constraints | Meaning |
+|---|---|---|---|
+| photo_id | INTEGER | PK, FK photos ON DELETE CASCADE | |
+| metrics_json | TEXT | NOT NULL | `analysis::Sample` of the edited photo at 960 px (`atMs` 0, `sharpness`, `brightness`, `contrast`, `clipLow`, `clipHigh`, `black`, `dhash`) |
+| tags_json | TEXT | | `tagging::MediaTags` with one sample at 0 ms (tags, cues), NULL when OpenCLIP was not installed |
+| model_id | TEXT | | `openclip-vit-b32` when tagged |
+| created_at | TEXT | NOT NULL, default now | |
+
+- **W**: `photos::store_analysis` (← job `media.photo_analyze`). **R**: `photos::analyses` (← `editing::gather_photos`), `photos::list` / `get` (`analyzed` flag via EXISTS).
+- Kept when the edit stack changes later (**ponytail:** observations may lag behind new edits until the photo is analysed again).
 
 ## 4. Invalidation and cascades
 

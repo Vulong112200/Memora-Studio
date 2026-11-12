@@ -2,7 +2,7 @@
 
 The React webview of the Tauri app: a sidebar with five pages (Library, Projects, Photos, Jobs, Settings), a "Next step" banner and a job bar; cards call Rust commands through typed wrappers and follow background jobs through `job-updated` events. Bilingual (Vietnamese default, English).
 
-Last verified: 2026-11-11 against commit `9ac182c` + uncommitted changes.
+Last verified: 2026-11-12 against commit `7eeb0bd` + uncommitted changes.
 
 Index of all system docs: [README.md](README.md). The `sync-docs` skill (`.claude/skills/sync-docs/`) keeps this file current; run it after any change under `apps/desktop/` outside `src-tauri/`.
 
@@ -150,9 +150,14 @@ Constants: `LOW_COMMIT_BYTES = 8 * 1024 ** 3` (8 GiB; Production.md §9.2 small 
 | `addClip(projectId, mediaId, inMs, outMs)` | `add_clip` | `{ projectId, mediaId, inMs, outMs }` | `Clip` |
 | `removeClip(id)` | `remove_clip` | `{ id }` | `void` |
 | `moveClip(id, delta)` | `move_clip` | `{ id, delta }` | `void` |
+| `addPhotoClips(projectId, photoIds, ms?)` | `add_photo_clips` | `{ projectId, photoIds, ms }` | `Clip[]` |
+| `setClipRange(id, inMs, outMs)` | `set_clip_range` | `{ id, inMs, outMs }` | `Clip` |
+| `setClipTransition(id, transition, transitionMs)` | `set_clip_transition` | `{ id, transition \| null, transitionMs }` | `Clip` |
+| `listJoins(projectId)` | `list_joins` | `{ projectId }` | `Join[]` (`[name, ms]` per join) |
+| `previewJoin(projectId, index, preset)` | `preview_join` | `{ projectId, index, preset }` | `string` (cache file) |
 | `setClipCaption(id, caption)` | `set_clip_caption` | `{ id, caption }` | `void` |
 | `listSounds()` | `list_sounds` | — | `Track[]` |
-| `recommendSounds(projectId)` | `recommend_sounds` | `{ projectId }` | `SoundRecommendation[]` |
+| `recommendSounds(projectId, videoMs?)` | `recommend_sounds` | `{ projectId \| null, videoMs \| null }` | `SoundRecommendation[]` (null project = photo video) |
 | `getExportOptions(projectId)` | `get_export_options` | `{ projectId }` | `ExportOptions` |
 | `setExportOptions(projectId, options)` | `set_export_options` | `{ projectId, options }` | `void` |
 | `submitJob(kind, params?)` | `submit_job` | `{ kind, params }` | `Job` (queued) |
@@ -245,6 +250,8 @@ Local result types (not in api.ts): `ImportResult { imported, ids, failed[]{path
 
 ### EditingPlan.tsx
 
+- **Photos** (2026-11-12): plan rows with `photoId` show the photo thumbnail (🖼, seconds) from `listPhotos`.
+
 - **Purpose**: Smart mode (Production.md §6.4), step 2 of a project: free-text request + style + date range → Editing Plan, review / reorder / drop clips, use it (replaces the timeline), optionally export at once.
 - **Props**: `project: Project`, `onApplied()` (App bumps `version` and opens step 3).
 - **State**: `styles`, `styleId` (default `"journey_recap"`), `rangeId` (default `"all"`), `from`, `to`, `plan`, `order: number[]`, `media: Map<id, Media>`, `message` (errors), `busy`, `request`, `reading`, `replacing: {clips, thenExport} | null`.
@@ -257,16 +264,19 @@ Local result types (not in api.ts): `ImportResult { imported, ids, failed[]{path
 
 ### Timeline.tsx
 
-- **Purpose**: step 3 of a project: the timeline (ordered trimmed clips), per-clip captions, Look & sound, export with progress and validation report.
+- **Purpose**: step 3 of a project: the timeline (ordered video clips and photos) as a visual strip with every transition, per-join transition choice and preview, per-clip captions, Look & sound, export with progress and validation report.
 - **Props**: `project: Project`, `version: number`.
-- **State**: `clips`, `media`, `preset` (default `"landscape"`), `options`, `job` (latest `media.export` of this project), `error`.
-- **Exports**: `clock(ms)` → `m:ss.s` (also used by EditingPlan and MediaLibrary).
+- **State**: `clips`, `media`, `photos` (map), `joins`, `adding` (photo picker open), `preset` (default `"landscape"`), `options`, `job` (latest `media.export` of this project), `error`.
+- **Exports**: `clock(ms)` → `m:ss.s` (also used by EditingPlan and MediaLibrary); `PRESETS`, `Report`, `LookAndSound` (used by PhotoEditor); `openPhoto(id)` (dispatches `memora:open-photo`).
 - **Sub-components**:
   - `Report({r})` — green (passed) or red (failed validation) box, output path + **copy path** (`navigator.clipboard`), size · duration · render time (encoder), checks ✓/✗, warnings.
   - `CaptionField({clip, onSaved, onError})` — saved with `setClipCaption` on blur when changed.
-  - `MusicLibrary({projectId, version, current, onUse, onClose})` — free library: recommendations (`recommendSounds`), mood chips, ▶/■ streamed preview, **Use** / "Chosen"; licence/credit text.
-  - `LookAndSound({o, projectId, version, onChange, onError})` — Picture: transition length (0 cuts, 300, 500, 700, 800, 1200 ms; other values appended), transition style (`TRANSITIONS`, when length > 0), colour (`COLORS`), fill, fade. Sound: clip sound %, music (library / own file / remove, level, duck), even loudness. Text: opening title, subtitle, ending, speech subtitles.
-- **Commands**: `listClips`, `listMedia`, `getExportOptions`, `setExportOptions`, `moveClip`, `removeClip`, `setClipCaption`, `listSounds`, `recommendSounds`, `submitJob("media.export")`, `cancelJob`.
+  - `Strip({project, clips, joins, media, photos, preset, onChanged, onError})` — horizontal blocks (width `ms/1000 × 14` px, 56–260), join chips (selected = indigo, set on the clip = amber); join panel: style select (`Project setting` / `TRANSITIONS`) and length (`JOIN_LENGTHS`, when set) → `setClipTransition`; **▶ Preview this join** → `previewJoin` → `<video>`.
+  - `AddPhotos({project, onAdded, onClose, onError})` — library photos (`listPhotos`), click order badges, seconds (`PHOTO_SECONDS`), **Add N photos** → `addPhotoClips`.
+  - Photo rows: 🖼 name, **Edit photo** (`openPhoto`), seconds select → `setClipRange(id, 0, ms)`.
+  - `MusicLibrary({projectId | null, videoMs?, version, current, onUse, onClose})` — free library: recommendations (`recommendSounds`), mood chips, ▶/■ streamed preview, **Use** / "Chosen"; licence/credit text.
+  - `LookAndSound({o, projectId | null, videoMs?, photos?, version, onChange, onError})` (exported; `photos` hides clip sound, ducking and speech subtitles) — Picture: transition length (0 cuts, 300, 500, 700, 800, 1200 ms; other values appended), transition style (`TRANSITIONS`, when length > 0), colour (`COLORS`), fill, fade. Sound: clip sound %, music (library / own file / remove, level, duck), even loudness. Text: opening title, subtitle, ending, speech subtitles.
+- **Commands**: `listClips`, `listJoins`, `listMedia`, `listPhotos`, `getExportOptions`, `setExportOptions`, `moveClip`, `removeClip`, `setClipCaption`, `setClipRange`, `setClipTransition`, `addPhotoClips`, `previewJoin`, `listSounds`, `recommendSounds`, `submitJob("media.export")`, `cancelJob`.
 - **Events**: `job-updated` filtered to `media.export` of this project (exports started from Smart edit appear too).
 - **Actions**: card actions = export-format select (`PRESETS`; sets `fill` for story/reels) + **Export video**; per clip caption, **↑ ↓ Remove**; every Look & sound change saved at once (`setExportOptions`); **Cancel** during export.
 - **Display**: export progress and report at the top of the card; rows with number, `Thumb`, file, caption, in → out, length; footer "About <total> · rendered from the original files" (estimate: Σ − (n−1) × min(transition, half the shortest clip); the export clamps per join and `auto` varies the length).
@@ -287,11 +297,11 @@ Local result types (not in api.ts): `ImportResult { imported, ids, failed[]{path
 
 ### PhotoEditor.tsx
 
-- **Purpose**: the Photos page (ADR 0006, slice B1): add photos (read in place), pick one, edit with classical tools, export a full-size copy. Original files are never written.
+- **Purpose**: the Photos page (ADR 0006, slice B1): add photos (read in place), pick one, edit with classical tools, export a full-size copy; or make a video from picked photos. Original files are never written.
 - **Props**: none (keyed on the data root).
-- **State** (`PhotoEditor`): `photos`, `selected`, `importing`, `message`, `confirming` (remove). (`Editor`): `edits`, `history` (≤ 50 undo steps), `showMask`, `before` (URL), `showBefore`, `band` (HSL band), `message`, `working`.
-- **Sub-components / hooks**: `usePreview(id, edits, showMask, onError)` — 80 ms after a change, one `previewPhoto` in flight, the latest edits win, returns `{url, busy}`; `Editor({photo, onChanged})`.
-- **Commands**: `listPhotos`, `importPhotos`, `setPhotoEdits`, `previewPhoto`, `autoPhoto`, `exportPhoto`, `removePhoto`.
+- **State** (`PhotoEditor`): `photos`, `selected` (initially `localStorage` `memora.photo`, set by "Edit photo" on a timeline clip), `analysing` (ref: one `media.photo_analyze` submit per visit for photos with `analyzed` false; `job-updated` of that kind reloads the list), `importing`, `message`, `confirming` (remove), `video` (video mode), `picked` (ordered photo ids). (`PhotoVideo`): `s: {options: ExportOptions, photoMs, preset, name}` (`localStorage` `memora.photoVideo`), `job`, `error`. (`Editor`): `edits`, `history` (≤ 50 undo steps), `showMask`, `before` (URL), `showBefore`, `band` (HSL band), `message`, `working`.
+- **Sub-components / hooks**: `usePreview(id, edits, showMask, onError)` — 80 ms after a change, one `previewPhoto` in flight, the latest edits win, returns `{url, busy}`; `Editor({photo, onChanged})`; `PhotoVideo({photos, picked, setPicked})` — timeline strip (photo blocks with order and seconds, transition length between them, ◀ ✕ ▶), seconds per photo, format, name, `LookAndSound` (photos), **Create video** (`submitJob("media.photo_video")`), progress / cancel, `Report`; first use pre-selects the top `recommendSounds(null, …)` track.
+- **Commands**: `listPhotos`, `importPhotos`, `setPhotoEdits`, `previewPhoto`, `autoPhoto`, `exportPhoto`, `removePhoto`, `recommendSounds`, `submitJob("media.photo_video")`, `cancelJob`. Imports `PRESETS`, `LookAndSound`, `Report`, `clock` from `Timeline.tsx`.
 - **Actions**: **+ Add photos** (dialog, `PHOTO_EXTENSIONS`; first imported photo selected; per-file failures shown); thumbnail grid (✎ badge when edited; ✕ on hover → inline **Remove** / **Keep**); **✦ Auto** (merges `autoPhoto` values into the sliders); **↶ Undo**; **Reset**; **Hold: original** (press and hold shows `before`); **Show sky area** (mask overlay); **Export photo** (saves edits, then `exportPhoto`; path + copy link). Sliders save 500 ms after the last change (one undo step per save); double-click a slider label resets it.
 - **Panels** (`GROUPS`): Light (exposure, contrast, highlights, shadows, whites, blacks) · Colour (temperature, tint, vibrance, saturation, look select `LOOKS`, "One colour (HSL)" with 8 `BANDS` × hue / saturation / lightness) · Sky (enhance 0–100, cool ↔ warm; note that the photo's own sky is enhanced, nothing pasted) · Detail (clarity, dehaze, sharpen 0–100 edges only, noise reduction 0–100) · Effects & frame (vignette, straighten ±15°, rotate ⟲ ⟳, crop `CROPS`).
 - **Constants**: `PHOTO_EXTENSIONS`, `GROUPS`, `LOOKS`, `BANDS`, `CROPS` — labels bilingual.

@@ -31,7 +31,7 @@ use tauri::{Emitter, Manager, State};
 const NO_DATA_ROOT: &str = "Choose a data folder first.";
 /// Job kinds the UI may start. `diagnostic.*` kinds exist for tests only.
 const UI_JOB_KINDS: &[&str] =
-    &["validate_devices", "media.import", "media.proxy", "media.export", "media.analyze", "media.transcribe", "media.tag", "models.install"];
+    &["validate_devices", "media.import", "media.proxy", "media.export", "media.analyze", "media.transcribe", "media.tag", "media.photo_video", "media.photo_analyze", "models.install"];
 
 /// `<data root>\cache`: thumbnails and proxies. The only folder the webview may load files from.
 fn cache_dir(state: &AppState) -> Option<PathBuf> {
@@ -276,7 +276,8 @@ fn make_plan(c: &Connection, project_id: i64, style: &str, from: Option<&str>, t
         _ => (from.map(String::from), to.map(String::from)),
     };
     let wishes = req.map(|r| r.wishes).unwrap_or_default();
-    let plan = editing::plan_with(&st, &editing::gather(c, from.as_deref(), to.as_deref())?, &wishes);
+    let (from, to) = (from.as_deref(), to.as_deref());
+    let plan = editing::plan_with_photos(&st, &editing::gather(c, from, to)?, &editing::gather_photos(c, from, to)?, &wishes);
     editing::save(c, project_id, &plan)?;
     Ok(plan)
 }
@@ -345,6 +346,53 @@ fn add_clip(project_id: i64, media_id: i64, in_ms: i64, out_ms: i64, state: Stat
     with_db(&state, |c| timeline::add(c, project_id, media_id, in_ms, out_ms))
 }
 
+/// Appends library photos to the timeline (each shown `ms`, default 4 s), in the given order.
+#[tauri::command]
+fn add_photo_clips(project_id: i64, photo_ids: Vec<i64>, ms: Option<i64>, state: State<'_, AppState>) -> Result<Vec<timeline::Clip>, String> {
+    with_db(&state, |c| photo_ids.iter().map(|&id| timeline::add_photo(c, project_id, id, ms.unwrap_or(timeline::PHOTO_DEFAULT_MS))).collect())
+}
+
+/// New In / Out of a clip (for a photo: 0 and its length).
+#[tauri::command]
+fn set_clip_range(id: i64, in_ms: i64, out_ms: i64, state: State<'_, AppState>) -> Result<timeline::Clip, String> {
+    with_db(&state, |c| timeline::set_range(c, id, in_ms, out_ms))
+}
+
+/// Transition into one clip (`transition` null = back to the project's transition).
+#[tauri::command]
+fn set_clip_transition(id: i64, transition: Option<String>, transition_ms: i64, state: State<'_, AppState>) -> Result<timeline::Clip, String> {
+    with_db(&state, |c| timeline::set_transition(c, id, transition.as_deref(), transition_ms))
+}
+
+/// Every join of the timeline as it will be exported: `[xfade name, ms]`.
+#[tauri::command]
+fn list_joins(project_id: i64, state: State<'_, AppState>) -> Result<Vec<export::Join>, String> {
+    with_db(&state, |c| export::timeline_joins(c, project_id))
+}
+
+/// Short low-resolution render around one join, for checking a transition (file in the cache, shown by the webview).
+#[tauri::command]
+async fn preview_join(project_id: i64, index: usize, preset: String, state: State<'_, AppState>) -> Result<PathBuf, String> {
+    let (db, lane, root) = photo_ctx(&state)?;
+    let preset = export::Preset::parse(&preset)?;
+    blocking(move || {
+        let job_object = process::JobObject::new()?;
+        let env = media::MediaEnv {
+            ffprobe: media::tool_path(Some(&root), "ffprobe.exe"),
+            ffmpeg: media::tool_path(Some(&root), "ffmpeg.exe"),
+            cache: root.join("cache"),
+            job_object: &job_object,
+            db: &db,
+        };
+        let still = |p: &photos::Photo, out: &std::path::Path| {
+            let r = lane.call("photo_render", serde_json::json!({"path": p.path, "edits": p.edits, "maxSide": 1280, "out": out, "quality": 90}))?;
+            Ok((r["outWidth"].as_i64().unwrap_or(0), r["outHeight"].as_i64().unwrap_or(0)))
+        };
+        export::preview_join(&env, project_id, index, preset, &still)
+    })
+    .await
+}
+
 #[tauri::command]
 fn set_clip_caption(id: i64, caption: String, state: State<'_, AppState>) -> Result<(), String> {
     with_db(&state, |c| timeline::set_caption(c, id, &caption))
@@ -367,10 +415,14 @@ fn list_sounds() -> Vec<sounds::Track> {
 }
 
 /// Library tracks that suit the project's video: its plan style, what is on screen in the timeline clips,
-/// the timeline length and how much of it is speech.
+/// the timeline length and how much of it is speech. Without a project (photo video): gentle moods and `video_ms`.
 #[tauri::command]
-fn recommend_sounds(project_id: i64, state: State<'_, AppState>) -> Result<Vec<sounds::Recommendation>, String> {
-    with_db(&state, |c| recommend_for(c, project_id, 3))
+fn recommend_sounds(project_id: Option<i64>, video_ms: Option<i64>, state: State<'_, AppState>) -> Result<Vec<sounds::Recommendation>, String> {
+    match project_id {
+        Some(id) => with_db(&state, |c| recommend_for(c, id, 3)),
+        // Photo video: no tags or speech; gentle "memories" moods and the video length.
+        None => Ok(sounds::recommend("memory_nostalgia", &[], video_ms.unwrap_or(0), 0.0, 3)),
+    }
 }
 
 fn recommend_for(c: &Connection, project_id: i64, n: usize) -> Result<Vec<sounds::Recommendation>, String> {
@@ -381,12 +433,13 @@ fn recommend_for(c: &Connection, project_id: i64, n: usize) -> Result<Vec<sounds
     for clip in &clips {
         let len = clip.out_ms - clip.in_ms;
         total += len;
-        if let Some(t) = tagging::get(c, clip.media_id)? {
+        let Some(media_id) = clip.media_id else { continue }; // photos: no tags or speech yet
+        if let Some(t) = tagging::get(c, media_id)? {
             for s in tagging::summarize(&t, clip.in_ms, clip.out_ms, 0.1).into_iter().filter(|s| !s.negative) {
                 *tags.entry(s.en).or_default() += s.score * len as f64;
             }
         }
-        if let Some(t) = transcribe::get(c, clip.media_id)? {
+        if let Some(t) = transcribe::get(c, media_id)? {
             speech += t.segments.iter().map(|s| (s.end_ms.min(clip.out_ms) - s.start_ms.max(clip.in_ms)).max(0)).sum::<i64>();
         }
     }
@@ -528,10 +581,12 @@ fn job_runner(settings: Arc<Mutex<settings::Settings>>, db: Db, worker_info: Arc
         match job.kind.as_str() {
             "media.import" => media::import_job(job, progress, cancelled, &env),
             "media.proxy" => proxy::proxy_job(job, progress, cancelled, &env),
-            "media.export" => export::export_job(job, progress, cancelled, &env, &root.join("projects")),
+            "media.export" => export::export_job(job, progress, cancelled, &env, &root.join("projects"), &mut ai),
             "media.analyze" => analysis::analyze_job(job, progress, cancelled, &env, &mut ai),
             "media.tag" => tagging::tag_job(job, progress, cancelled, &env, &mut ai),
             "media.transcribe" => transcribe::transcribe_job(job, progress, cancelled, &env, &root),
+            "media.photo_video" => photos::video_job(job, progress, cancelled, &env, &root, &mut ai),
+            "media.photo_analyze" => photos::analyze_job(job, progress, cancelled, &env, &mut ai),
             k => jobs::Outcome::Failed(format!("Unknown job kind: {k}")),
         }
     }))
@@ -603,6 +658,11 @@ pub fn run() {
             remove_model,
             list_clips,
             add_clip,
+            add_photo_clips,
+            set_clip_range,
+            set_clip_transition,
+            list_joins,
+            preview_join,
             remove_clip,
             list_sounds,
             recommend_sounds,

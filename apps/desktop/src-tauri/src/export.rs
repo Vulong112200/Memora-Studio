@@ -44,6 +44,9 @@ impl Preset {
     }
 }
 
+/// `Probe::video_codec` of a still photo shown as a clip (photo videos, `photos::video_job`): looped for `out_ms - in_ms`.
+pub const STILL: &str = "still";
+
 pub struct Segment {
     pub media: Media,
     pub in_ms: i64,
@@ -52,6 +55,8 @@ pub struct Segment {
     pub caption: Option<String>,
     /// Transcript lines of the source (original-file times), for automatic subtitles.
     pub speech: Vec<crate::transcribe::Segment>,
+    /// The user's transition into this segment (timeline clip setting); None = the project's transition.
+    pub transition: Option<Join>,
 }
 
 /// Background music chosen by the user (their own file; never modified).
@@ -187,7 +192,7 @@ impl Options {
         let clips: Vec<JoinClip> = segs.iter().map(|s| (s.media.id, s.media.probe.source_created_at.as_deref(), s.in_ms, s.out_ms)).collect();
         match &self.fixed_joins {
             Some(fixed) => fixed.iter().zip(clips.windows(2)).map(|(j, w)| (j.0.clone(), clamp_join(j.1, w[0], w[1]))).collect(),
-            None => joins(&self.transition, self.transition_ms, &clips),
+            None => joins_with(&self.transition, self.transition_ms, &clips, &segs.iter().map(|s| s.transition.clone()).collect::<Vec<_>>()),
         }
     }
 
@@ -240,11 +245,42 @@ pub fn joins(transition: &str, transition_ms: i64, clips: &[JoinClip]) -> Vec<Jo
         .collect()
 }
 
+/// `joins`, then the user's own transition into a clip (`into[i]`, the join before clip i) wherever one is set.
+pub fn joins_with(transition: &str, transition_ms: i64, clips: &[JoinClip], into: &[Option<Join>]) -> Vec<Join> {
+    let mut out = joins(transition, transition_ms, clips);
+    for (i, t) in into.iter().enumerate().skip(1).take(out.len()) {
+        if let Some((name, ms)) = t {
+            out[i - 1] = joins(name, *ms, &clips[i - 1..=i]).remove(0);
+        }
+    }
+    out
+}
+
+/// Recording start used for `auto` transitions and the "same file" key: videos by media id, photos by −photo id
+/// (ids of the two tables never collide), photos dated by their taken time.
+fn join_source(c: &rusqlite::Connection, clip: &timeline::Clip) -> Result<(i64, Option<String>), String> {
+    match (clip.media_id, clip.photo_id) {
+        (Some(id), _) => Ok((id, media::get(c, id)?.and_then(|m| m.probe.source_created_at))),
+        (None, Some(id)) => Ok((-id, crate::photos::get(c, id)?.taken_at)),
+        _ => Err(format!("Clip {} has no source.", clip.id)),
+    }
+}
+
+/// Transitions of a project timeline as they will be exported (project options + per-clip choices), one per join.
+pub fn timeline_joins(c: &rusqlite::Connection, project_id: i64) -> Result<Vec<Join>, String> {
+    let o = load_options(c, project_id);
+    let clips = timeline::list(c, project_id)?;
+    let sources = clips.iter().map(|x| join_source(c, x)).collect::<Result<Vec<_>, _>>()?;
+    let jc: Vec<JoinClip> = clips.iter().zip(&sources).map(|(x, (id, t))| (*id, t.as_deref(), x.in_ms, x.out_ms)).collect();
+    Ok(joins_with(&o.transition, o.transition_ms, &jc, &clips.iter().map(timeline::Clip::join).collect::<Vec<_>>()))
+}
+
 fn clamp_join(ms: i64, a: JoinClip, b: JoinClip) -> i64 {
     ms.clamp(0, (a.3 - a.2).min(b.3 - b.2) / 2)
 }
 
-/// "2026-02-20T02:53:34.000000Z" → milliseconds since 1970 (UTC; FFprobe creation times end in Z).
+/// "2026-02-20T02:53:34.000000Z" or "2026-02-20T09:53:34+07:00" → milliseconds since 1970 (UTC). FFprobe creation
+/// times end in Z; photo times carry their zone (photo.py `taken`); no zone = UTC.
 pub(crate) fn unix_ms(s: &str) -> Option<i64> {
     let n = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
     let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
@@ -255,7 +291,15 @@ pub(crate) fn unix_ms(s: &str) -> Option<i64> {
     let yoe = y - era * 400;
     let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
     let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
-    Some(((days * 24 + hh) * 60 + mm) * 60_000 + ss * 1000)
+    let zone = s.get(19..).unwrap_or("").trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+    let offset = match zone.as_bytes().first() {
+        Some(b'+' | b'-') => {
+            let (h, m) = (zone.get(1..3)?.parse::<i64>().ok()?, zone.get(4..6).and_then(|x| x.parse::<i64>().ok()).unwrap_or(0));
+            (h * 60 + m) * 60_000 * if zone.starts_with('-') { -1 } else { 1 }
+        }
+        _ => 0,
+    };
+    Some(((days * 24 + hh) * 60 + mm) * 60_000 + ss * 1000 - offset)
 }
 
 fn ass_time(ms: i64) -> String {
@@ -411,8 +455,13 @@ pub fn build_args(segs: &[Segment], decode: Decode, encoder: Encoder, (w, h, fps
     };
     for (i, s) in segs.iter().enumerate() {
         let dur = secs(s.out_ms - s.in_ms);
-        args.extend(decode.input_args());
-        args.extend(os(&["-ss", &secs(s.in_ms), "-t", &dur, "-i"]));
+        let still = s.media.probe.video_codec == STILL;
+        if still {
+            args.extend(os(&["-loop", "1", "-framerate", &fps.to_string(), "-t", &dur, "-i"]));
+        } else {
+            args.extend(decode.input_args());
+            args.extend(os(&["-ss", &secs(s.in_ms), "-t", &dur, "-i"]));
+        }
         args.push(s.media.path.clone().into());
         let v = input;
         input += 1;
@@ -423,7 +472,7 @@ pub fn build_args(segs: &[Segment], decode: Decode, encoder: Encoder, (w, h, fps
             input += 1;
             format!("{}:a:0", input - 1)
         };
-        let up = decode.upright(s.media.probe.rotation);
+        let up = if still { String::new() } else { decode.upright(s.media.probe.rotation) };
         let (sw, sh) = fit(s.media.probe.width, s.media.probe.height, s.media.probe.rotation, i64::MAX);
         let mismatch = ((sw * h) as f64 / (sh * w).max(1) as f64 - 1.0).abs() > 0.05;
         if !o.fill && mismatch {
@@ -727,7 +776,7 @@ fn render_parts(
             duration_ms: ms, width: target.0, height: target.1, rotation: 0, fps: Some(target.2), video_codec: "h264".into(),
             audio_codec: Some("aac".into()), audio_streams: 1, bitrate: None, source_created_at: None,
         };
-        joined.push(Segment { media, in_ms: 0, out_ms: ms, caption: None, speech: vec![] });
+        joined.push(Segment { media, in_ms: 0, out_ms: ms, caption: None, speech: vec![], transition: None });
         files.push(file);
     }
     let join_o = Options { fixed_joins: Some((1..chunks.len()).map(|k| all[k * size - 1].clone()).collect()), ..o.clone() };
@@ -739,8 +788,16 @@ fn render_parts(
 }
 
 /// Job `media.export`, params `{"projectId": n, "preset": "landscape", "options": Options}`
-/// (legacy `fit` / `transitionMs` keys are still read when `options` is absent).
-pub fn export_job(job: &Job, progress: &dyn Fn(u64, u64), cancelled: &dyn Fn() -> bool, env: &MediaEnv, projects: &Path) -> Outcome {
+/// (legacy `fit` / `transitionMs` keys are still read when `options` is absent). Photo clips are rendered with their
+/// edits by the job worker (`ai`) into the render cache first (deleted afterwards).
+pub fn export_job(
+    job: &Job,
+    progress: &dyn Fn(u64, u64),
+    cancelled: &dyn Fn() -> bool,
+    env: &MediaEnv,
+    projects: &Path,
+    ai: &mut dyn FnMut(&Job, &dyn Fn(u64, u64), &dyn Fn() -> bool) -> Outcome,
+) -> Outcome {
     let (Some(project_id), Some(preset_name)) = (job.params["projectId"].as_i64(), job.params["preset"].as_str()) else {
         return Outcome::Failed("media.export needs params.projectId and params.preset".into());
     };
@@ -752,20 +809,53 @@ pub fn export_job(job: &Job, progress: &dyn Fn(u64, u64), cancelled: &dyn Fn() -
         let name: String = c
             .query_row("SELECT name FROM projects WHERE id = ?1", [project_id], |r| r.get(0))
             .map_err(|_| format!("Project {project_id} not found."))?;
-        let segs = timeline::list(c, project_id)?
+        let parts = timeline::list(c, project_id)?
             .into_iter()
             .map(|clip| {
-                let media = media::get(c, clip.media_id)?.ok_or("Clip refers to missing media.")?;
-                let speech = crate::transcribe::get(c, clip.media_id)?.map(|t| t.segments).unwrap_or_default();
-                Ok(Segment { media, in_ms: clip.in_ms, out_ms: clip.out_ms, caption: clip.caption, speech })
+                let transition = clip.join();
+                match (clip.media_id, clip.photo_id) {
+                    (Some(id), _) => {
+                        let media = media::get(c, id)?.ok_or("Clip refers to missing media.")?;
+                        let speech = crate::transcribe::get(c, id)?.map(|t| t.segments).unwrap_or_default();
+                        Ok(Err(Segment { media, in_ms: clip.in_ms, out_ms: clip.out_ms, caption: clip.caption, speech, transition }))
+                    }
+                    (None, Some(id)) => Ok(Ok((crate::photos::get(c, id)?, clip))),
+                    _ => Err(format!("Clip {} has no source.", clip.id)),
+                }
             })
             .collect::<Result<Vec<_>, String>>()?;
-        Ok((name, segs))
+        Ok((name, parts))
     });
-    let (name, segs) = match loaded {
+    let (name, parts) = match loaded {
         Ok(x) => x,
         Err(e) => return Outcome::Failed(e),
     };
+    if let Some(p) = parts.iter().filter_map(|p| p.as_ref().ok()).find(|(p, _)| !Path::new(&p.path).exists()) {
+        return Outcome::Failed(format!("Photo file is missing: {}", p.0.path));
+    }
+    // Photos first become stills (Ok = photo still to render, Err = video segment ready).
+    let photos = parts.iter().filter(|p| p.is_ok()).count() as u64;
+    let share = if photos > 0 { 100 } else { 0 };
+    let dir = env.cache.join("render");
+    let mut stills = vec![];
+    let mut segs = vec![];
+    for part in parts {
+        match part {
+            Err(seg) => segs.push(seg),
+            Ok((photo, clip)) => {
+                progress(stills.len() as u64 * share / photos, 1000);
+                match crate::photos::still(job, ai, cancelled, &dir, &photo, clip.out_ms - clip.in_ms, stills.len()) {
+                    Ok((mut seg, file)) => {
+                        seg.transition = clip.join();
+                        seg.caption = clip.caption;
+                        segs.push(seg);
+                        stills.push(file);
+                    }
+                    Err(outcome) => return outcome,
+                }
+            }
+        }
+    }
     let Some(first) = segs.first() else {
         return Outcome::Failed("The project timeline is empty. Add clips first.".into());
     };
@@ -784,14 +874,104 @@ pub fn export_job(job: &Job, progress: &dyn Fn(u64, u64), cancelled: &dyn Fn() -
             ..Options::default()
         },
     };
-    let mut o = o;
+    tracing::info!(project_id, photos, "project export");
+    let scaled = |d: u64, t: u64| progress(share + d * (1000 - share) / t.max(1), 1000);
+    let outcome = finish(env, &segs, target, preset_name, o, output_path(projects, project_id, &name, preset_name), &scaled, cancelled);
+    drop(stills);
+    outcome
+}
+
+/// A few seconds around join `index` (end of clip `index`, the transition, start of the next) at half the export size,
+/// from the preview proxies when they exist (originals otherwise; photos via `still`, which renders one with its edits
+/// to the given file and returns its size) — to check a transition without exporting. No music, titles or fades.
+/// Returns `cache\render\join-preview-<n>.mp4` (earlier previews removed).
+pub fn preview_join(
+    env: &MediaEnv,
+    project_id: i64,
+    index: usize,
+    preset: Preset,
+    still: &dyn Fn(&crate::photos::Photo, &Path) -> Result<(i64, i64), String>,
+) -> Result<PathBuf, String> {
+    let (clips, o, joins) = env.with_db(|c| Ok((timeline::list(c, project_id)?, load_options(c, project_id), timeline_joins(c, project_id)?)))?;
+    let (Some(a), Some(b), Some(join)) = (clips.get(index), clips.get(index + 1), joins.get(index)) else {
+        return Err(format!("No join #{index} in this timeline."));
+    };
+    let dir = env.cache.join("render");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
+    let n = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let lead = 1_500.max(join.1);
+    let mut temp = vec![];
+    let mut segs = vec![];
+    for (k, (clip, from, to)) in [(a, (a.out_ms - join.1 - lead).max(a.in_ms), a.out_ms), (b, b.in_ms, (b.in_ms + join.1 + lead).min(b.out_ms))].into_iter().enumerate() {
+        let media = match (clip.media_id, clip.photo_id) {
+            (Some(id), _) => {
+                let mut m = env.with_db(|c| media::get(c, id))?.ok_or("Clip refers to missing media.")?;
+                let proxy = crate::proxy::proxy_path(&env.cache, id);
+                if proxy.exists() {
+                    // The proxy is upright and on the same time line as the original.
+                    (m.probe.width, m.probe.height) = fit(m.probe.width, m.probe.height, m.probe.rotation, i64::MAX);
+                    m.probe.rotation = 0;
+                    m.path = proxy.to_string_lossy().into();
+                }
+                m
+            }
+            (None, Some(id)) => {
+                let p = env.with_db(|c| crate::photos::get(c, id))?;
+                let file = crate::sounds::TempFile(dir.join(format!("join-still-{n}-{k}.jpg")));
+                let (w, h) = still(&p, &file.0)?;
+                let m = crate::photos::still_media(&p, &file.0, w, h, to - from);
+                temp.push(file);
+                m
+            }
+            _ => return Err(format!("Clip {} has no source.", clip.id)),
+        };
+        segs.push(Segment { media, in_ms: from, out_ms: to, caption: None, speech: vec![], transition: None });
+    }
+    for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().starts_with("join-preview-") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    let (w, h, fps) = preset.target(&segs[0].media);
+    let half = ((w / 2) & !1, (h / 2) & !1, fps.min(30.0));
+    let po = Options { fill: o.fill, color: o.color.clone(), fixed_joins: Some(vec![join.clone()]), ..Options::default() };
+    let out = dir.join(format!("join-preview-{n}.mp4"));
+    write_atomically(&out, |part| {
+        let mut args = build_args(&segs, Decode::Software, Encoder::X264, half, &po, None);
+        args.extend(os(&["-preset", "veryfast"]));
+        args.push(part.into());
+        run_ffmpeg(env, &args, po.duration(&segs), &|_| {}, &|| false).map(drop)
+    })
+    .map_err(|e| match e {
+        RunError::Failed(e) => e,
+        RunError::Cancelled => "Cancelled.".into(),
+    })?;
+    drop(temp);
+    Ok(out)
+}
+
+/// Shared end of every video export (projects and photo videos): library music, render, loudness, validation,
+/// then promotion to `planned` (never replacing a file; a file that failed validation gets a `-failed-validation` name).
+#[allow(clippy::too_many_arguments)]
+pub fn finish(
+    env: &MediaEnv,
+    segs: &[Segment],
+    target: (i64, i64, f64),
+    preset_name: &str,
+    mut o: Options,
+    planned: PathBuf,
+    progress: &dyn Fn(u64, u64),
+    cancelled: &dyn Fn() -> bool,
+) -> Outcome {
     if let Err(e) = o.check() {
         return Outcome::Failed(e);
     }
-    let planned = output_path(projects, project_id, &name, preset_name);
+    if let Err(e) = planned.parent().map_or(Ok(()), std::fs::create_dir_all) {
+        return Outcome::Failed(format!("Cannot create the export folder: {e}"));
+    }
     // Rendered, levelled and validated under a temporary name; only then promoted to the final name.
     let staging = planned.with_extension("unvalidated.mp4");
-    let expected_ms = o.duration(&segs);
+    let expected_ms = o.duration(segs);
 
     // Library music: kept in `<data root>\music\` after the first download (verified on every use).
     const TOTAL: u64 = 1000;
@@ -818,7 +998,7 @@ pub fn export_job(job: &Job, progress: &dyn Fn(u64, u64), cancelled: &dyn Fn() -
     }
     // Rendering is ~85 % of the job, validation (a full decode) the rest.
     let started = Instant::now();
-    let encoder = match render(env, &segs, target, &o, &staging, &|f| progress(50 + (f * 850.0) as u64, TOTAL), cancelled) {
+    let encoder = match render(env, segs, target, &o, &staging, &|f| progress(50 + (f * 850.0) as u64, TOTAL), cancelled) {
         Ok(e) => e,
         Err(RunError::Cancelled) => return Outcome::Cancelled,
         Err(RunError::Failed(e)) => return Outcome::Failed(format!("Render failed: {e}")),
@@ -843,14 +1023,14 @@ pub fn export_job(job: &Job, progress: &dyn Fn(u64, u64), cancelled: &dyn Fn() -
         return Outcome::Failed(format!("Cannot move the finished video to {}: {e} (it is still at {})", out.display(), staging.display()));
     }
     progress(TOTAL, TOTAL);
-    tracing::info!(project_id, preset = preset_name, encoder, render_seconds, ok = validation.ok, path = %out.display(), "export finished");
+    tracing::info!(preset = preset_name, encoder, render_seconds, ok = validation.ok, path = %out.display(), "export finished");
     Outcome::Completed(json!({
         "path": out,
         "preset": preset_name,
         "encoder": encoder,
         "renderSeconds": (render_seconds * 10.0).round() / 10.0,
         "durationMs": expected_ms,
-        "joins": o.joins(&segs),
+        "joins": o.joins(segs),
         "options": o,
         "music": music_info,
         "loudness": loudness,
@@ -904,6 +1084,7 @@ mod tests {
                 transcribed: false, tags: None, mark: Default::default() },
             in_ms, out_ms, caption: caption.map(String::from),
             speech: speech.iter().map(|&(a, b, t)| crate::transcribe::Segment { start_ms: a, end_ms: b, text: t.into() }).collect(),
+            transition: None,
         }
     }
 
@@ -978,6 +1159,26 @@ mod tests {
     }
 
     #[test]
+    fn times_with_zones() {
+        assert_eq!(unix_ms("2026-02-20T15:21:20+07:00"), unix_ms("2026-02-20T08:21:20.000000Z"));
+        assert_eq!(unix_ms("2026-02-20T03:00:00-05:00"), unix_ms("2026-02-20T08:00:00Z"));
+        assert_eq!(unix_ms("2026-02-20T08:00:00"), unix_ms("2026-02-20T08:00:00Z"), "no zone = UTC");
+    }
+
+    #[test]
+    fn stills_are_looped_and_never_hardware_decoded() {
+        let mut photo = seg(0, 3_000, None, &[]);
+        photo.media.probe.video_codec = STILL.into();
+        let args: Vec<String> = build_args(&[photo, seg(0, 2_000, None, &[])], Decode::Hybrid, Encoder::X264, (1920, 1080, 30.0), &Options::default(), None)
+            .into_iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        let first_input = args.iter().position(|a| a == "-i").unwrap();
+        assert_eq!(&args[..first_input], ["-loop", "1", "-framerate", "30", "-t", "3.000"], "still: looped image, no QSV decode, no seek");
+        assert!(args[first_input + 1..].contains(&"qsv".to_string()), "the video clip keeps the hybrid decode");
+        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        assert!(graph.starts_with("[0:v:0]scale="), "no hwdownload for the still: {graph}");
+    }
+
+    #[test]
     fn storage_errors_are_not_retried() {
         assert!(storage_error("FFmpeg exited with exit code: 1: av_interleaved_write_frame(): No space left on device"));
         assert!(storage_error("Cannot write E:\\x.mp4: Access is denied. (os error 5)"));
@@ -1010,7 +1211,7 @@ mod tests {
 
         // Rotation: hybrid vs software must give the same upright picture.
         let target = (180, 320, 30.0);
-        let one = |m: &Media| vec![Segment { media: m.clone(), in_ms: 0, out_ms: 1000, caption: None, speech: vec![] }];
+        let one = |m: &Media| vec![Segment { media: m.clone(), in_ms: 0, out_ms: 1000, caption: None, speech: vec![], transition: None }];
         let (sw, hy) = (dir.join("sw.mp4"), dir.join("hy.mp4"));
         let mut args = build_args(&one(&mr), Decode::Software, Encoder::X264, target, &Options::default(), None);
         args.push(sw.clone().into());
@@ -1028,8 +1229,8 @@ mod tests {
 
         // Trim + concat + validate.
         let segs = vec![
-            Segment { media: ma.clone(), in_ms: 500, out_ms: 1500, caption: Some("Đà Lạt".into()), speech: vec![] },
-            Segment { media: mr.clone(), in_ms: 1000, out_ms: 2500, caption: None, speech: vec![crate::transcribe::Segment { start_ms: 1200, end_ms: 2000, text: "Xin chào".into() }] },
+            Segment { media: ma.clone(), in_ms: 500, out_ms: 1500, caption: Some("Đà Lạt".into()), speech: vec![], transition: None },
+            Segment { media: mr.clone(), in_ms: 1000, out_ms: 2500, caption: None, speech: vec![crate::transcribe::Segment { start_ms: 1200, end_ms: 2000, text: "Xin chào".into() }], transition: None },
         ];
         let target = Preset::Landscape.target(&ma);
         let out = dir.join("out.mp4");
@@ -1115,7 +1316,7 @@ fn real_library_export() {
         .map(|c| {
             let m = sources.iter().find(|s| s.media.id == c.media_id).unwrap();
             let speech = m.transcript.as_ref().map(|t| t.segments.clone()).unwrap_or_default();
-            Segment { media: m.media.clone(), in_ms: c.in_ms, out_ms: c.out_ms, caption: None, speech }
+            Segment { media: m.media.clone(), in_ms: c.in_ms, out_ms: c.out_ms, caption: None, speech, transition: None }
         })
         .collect();
     let target = Preset::parse(st.export_preset).unwrap().target(&segs[0].media);

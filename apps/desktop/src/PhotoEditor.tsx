@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { autoPhoto, exportPhoto, importPhotos, listPhotos, previewPhoto, removePhoto, setPhotoEdits, type Photo, type PhotoEdits } from "./api";
+import {
+  autoPhoto, cancelJob, exportPhoto, importPhotos, listPhotos, onJobUpdated, previewPhoto, recommendSounds, removePhoto, setPhotoEdits, submitJob,
+  type ExportOptions, type ExportPreset, type ExportResult, type Job, type Photo, type PhotoEdits,
+} from "./api";
 import { dateTime, L } from "./i18n";
-import { btn, Card, field, fileName, Thumb } from "./ui";
+import { clock, LookAndSound, PRESETS, Report } from "./Timeline";
+import { btn, Card, field, fileName, Progress, Thumb } from "./ui";
 
 /** Offered in the file picker (src-tauri photos::EXTENSIONS). */
 const PHOTO_EXTENSIONS = ["jpg", "jpeg", "png", "tif", "tiff", "webp", "bmp"];
@@ -225,15 +229,158 @@ function Editor({ photo, onChanged }: { photo: Photo; onChanged: () => void }) {
   );
 }
 
+const VIDEO_KEY = "memora.photoVideo";
+const PHOTO_SECONDS = [2, 3, 4, 5, 6, 8, 10];
+const VIDEO_DEFAULTS: ExportOptions = {
+  fill: false, transitionMs: 800, transition: "fade", color: "none", fade: true, originalVolume: 0, music: null,
+  titles: { title: "", subtitle: "", ending: "", captions: false }, normalize: true,
+};
+type VideoSettings = { options: ExportOptions; photoMs: number; preset: ExportPreset; name: string };
+
+function loadVideoSettings(): VideoSettings | null {
+  try {
+    const v = JSON.parse(localStorage.getItem(VIDEO_KEY) ?? "null");
+    return v && v.options ? { ...v, options: { ...VIDEO_DEFAULTS, ...v.options } } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Video from photos: the picked photos in order (with their edits), each shown `photoMs`, joined by the chosen transition,
+ *  with music and titles — job `media.photo_video`, same export pipeline as projects. */
+function PhotoVideo({ photos, picked, setPicked }: { photos: Photo[]; picked: number[]; setPicked: (ids: number[]) => void }) {
+  const stored = useState(loadVideoSettings)[0];
+  const [s, setS] = useState<VideoSettings>(stored ?? { options: VIDEO_DEFAULTS, photoMs: 3000, preset: "landscape", name: "" });
+  const [job, setJob] = useState<Job | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const byId = new Map(photos.map((p) => [p.id, p]));
+  const items = picked.map((id) => byId.get(id)).filter((p): p is Photo => !!p);
+  const join = items.length > 1 ? Math.min(s.options.transitionMs, s.photoMs / 2) : 0;
+  const total = items.length * s.photoMs - Math.max(0, items.length - 1) * join;
+
+  useEffect(() => { try { localStorage.setItem(VIDEO_KEY, JSON.stringify(s)); } catch { /* convenience only */ } }, [s]);
+  // First time: suggest a library track that suits a photo video (the user can change or remove it).
+  useEffect(() => {
+    if (stored) return;
+    recommendSounds(null, 60000)
+      .then((r) => r[0] && setS((x) => (x.options.music ? x : { ...x, options: { ...x.options, music: { path: "", library: r[0].id, volume: 1, duck: false } } })))
+      .catch(() => {});
+  }, [stored]);
+  useEffect(() => {
+    const unlisten = onJobUpdated((j) => setJob((cur) => (cur && cur.id === j.id ? j : cur)));
+    return () => { unlisten.then((f) => f()); };
+  }, []);
+
+  const move = (i: number, d: number) => {
+    const next = [...picked];
+    [next[i], next[i + d]] = [next[i + d], next[i]];
+    setPicked(next);
+  };
+  const byDate = (ids: number[]) => [...ids].sort((a, b) => (byId.get(a)?.takenAt ?? "").localeCompare(byId.get(b)?.takenAt ?? "") || a - b);
+  const running = job && (job.status === "queued" || job.status === "running");
+  const result = job?.status === "completed" ? (job.result as ExportResult) : null;
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <span className="font-medium">{L(`${items.length} photos`, `${items.length} ảnh`)} · {clock(total)}</span>
+        <span className="text-zinc-500">{L("Click photos above to add or remove them; the video follows this order.", "Bấm ảnh ở trên để thêm / bỏ; video theo đúng thứ tự này.")}</span>
+        <button className={btn.link} onClick={() => setPicked(byDate(photos.map((p) => p.id)))}>{L("All photos", "Tất cả ảnh")}</button>
+        <button className={btn.link} onClick={() => setPicked(byDate(picked))}>{L("Sort by date taken", "Xếp theo ngày chụp")}</button>
+        <button className={btn.link} onClick={() => setPicked([])}>{L("Clear", "Bỏ chọn hết")}</button>
+      </div>
+      {/* Timeline: one block per photo, the transition between them. */}
+      <ol className="mt-2 flex items-center overflow-x-auto rounded-xl border border-zinc-200 p-2 dark:border-zinc-800">
+        {items.length === 0 && <li className="p-4 text-sm text-zinc-500">{L("No photos picked yet.", "Chưa chọn ảnh nào.")}</li>}
+        {items.map((p, i) => (
+          <li key={p.id} className="flex shrink-0 items-center">
+            {i > 0 && (
+              <span className="mx-1 rounded bg-indigo-50 px-1 text-[10px] text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300" title={s.options.transition}>
+                {join > 0 ? `⟷ ${(join / 1000).toFixed(1)}s` : "|"}
+              </span>
+            )}
+            <div className="group relative w-24">
+              <Thumb path={p.thumb} className="aspect-square w-full rounded-lg" />
+              <span className="absolute left-1 top-1 rounded bg-black/70 px-1 text-[10px] text-white">{i + 1} · {s.photoMs / 1000}s</span>
+              <span className="absolute inset-x-0 bottom-0 hidden justify-center gap-2 rounded-b-lg bg-black/70 py-0.5 text-xs text-white group-hover:flex">
+                <button disabled={i === 0} onClick={() => move(i, -1)} aria-label={L("Earlier", "Lên trước")}>◀</button>
+                <button onClick={() => setPicked(picked.filter((x) => x !== p.id))} aria-label={L("Leave out", "Bỏ ra")}>✕</button>
+                <button disabled={i === items.length - 1} onClick={() => move(i, 1)} aria-label={L("Later", "Ra sau")}>▶</button>
+              </span>
+            </div>
+          </li>
+        ))}
+      </ol>
+      <div className="mt-3 flex flex-wrap items-end gap-3 text-xs text-zinc-500">
+        <label className="flex flex-col gap-1">{L("Each photo", "Mỗi ảnh")}
+          <select className={field} value={s.photoMs} onChange={(e) => setS({ ...s, photoMs: Number(e.target.value) })}>
+            {PHOTO_SECONDS.map((n) => <option key={n} value={n * 1000}>{n} s</option>)}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">{L("Format", "Khổ video")}
+          <select className={field} value={s.preset} onChange={(e) => setS({ ...s, preset: e.target.value as ExportPreset })}>
+            {PRESETS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">{L("File name", "Tên file")}
+          <input className={field} value={s.name} maxLength={80} placeholder={L("Photo video", "Video ảnh")} onChange={(e) => setS({ ...s, name: e.target.value })} />
+        </label>
+        <button className={btn.primary} disabled={items.length === 0 || !!running}
+          onClick={() => {
+            setError(null);
+            submitJob("media.photo_video", { photoIds: items.map((p) => p.id), photoMs: s.photoMs, preset: s.preset, options: s.options, name: s.name || L("Photo video", "Video ảnh") })
+              .then(setJob).catch((e) => setError(String(e)));
+          }}>
+          🎬 {L("Create video", "Tạo video")}
+        </button>
+      </div>
+      <p className="mt-1 text-xs text-zinc-500">{L("Each photo is used with its edits from the editor. The photo files are never changed.", "Mỗi ảnh dùng bản đã chỉnh trong trình chỉnh ảnh. File ảnh gốc không bị thay đổi.")}</p>
+      <LookAndSound o={s.options} projectId={null} videoMs={total} photos version={0} onChange={(o) => setS({ ...s, options: o })} onError={setError} />
+      {running && (
+        <div className="mt-3 text-sm">
+          {job!.status === "queued" ? L("Waiting for other jobs…", "Đang chờ việc khác…") : job!.done < 200 ? L("Preparing the photos…", "Đang chuẩn bị ảnh…") : L("Rendering the video…", "Đang dựng video…")}{" "}
+          {job!.total > 0 && `${Math.round((job!.done / job!.total) * 100)}%`}{" "}
+          <button className={btn.link} onClick={() => cancelJob(job!.id).catch((e) => setError(String(e)))}>{L("Cancel", "Huỷ")}</button>
+          <div className="mt-1"><Progress value={job!.total ? job!.done / job!.total : 0} /></div>
+        </div>
+      )}
+      {job?.status === "failed" && <p className="mt-2 text-sm text-red-600">{job.error}</p>}
+      {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
+      {result && <Report r={result} />}
+    </div>
+  );
+}
+
 /** Photos page: library of photos (read in place) and the editor (ADR 0006, slice B1 — classical tools, no model). */
 export default function PhotoEditor() {
   const [photos, setPhotos] = useState<Photo[] | null>(null);
-  const [selected, setSelected] = useState<number | null>(null);
+  // Opened from a timeline clip ("Edit photo"): that photo first.
+  const [selected, setSelected] = useState<number | null>(() => Number(localStorage.getItem("memora.photo")) || null);
   const [importing, setImporting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<number | null>(null);
+  const [video, setVideo] = useState(false);
+  const [picked, setPicked] = useState<number[]>([]);
   const load = useCallback(() => { listPhotos().then(setPhotos).catch((e) => setMessage(String(e))); }, []);
   useEffect(load, [load]);
+  // Photos are analysed in the background (quality + content) so Smart edit can place them between video clips.
+  const analysing = useRef(false);
+  useEffect(() => {
+    const ids = photos?.filter((p) => !p.analyzed).map((p) => p.id) ?? [];
+    if (ids.length === 0 || analysing.current) return;
+    analysing.current = true;
+    submitJob("media.photo_analyze", { ids }).catch(() => { analysing.current = false; });
+  }, [photos]);
+  useEffect(() => {
+    const unlisten = onJobUpdated((j) => {
+      if (j.kind === "media.photo_analyze" && (j.status === "completed" || j.status === "failed" || j.status === "cancelled")) {
+        load();
+        if (j.status !== "completed") return; // failed / cancelled: retried on the next visit, not in a loop
+        analysing.current = false;
+      }
+    });
+    return () => { unlisten.then((f) => f()); };
+  }, [load]);
 
   async function add() {
     const picked = await open({ multiple: true, title: L("Add photos", "Thêm ảnh"), filters: [{ name: "Photos", extensions: PHOTO_EXTENSIONS }] });
@@ -254,7 +401,16 @@ export default function PhotoEditor() {
   const current = photos?.find((p) => p.id === selected) ?? null;
 
   return (
-    <Card title={L("Photos", "Ảnh")} actions={<button className={btn.primary} disabled={importing} onClick={add}>{importing ? L("Adding…", "Đang thêm…") : L("+ Add photos", "+ Thêm ảnh")}</button>}>
+    <Card title={L("Photos", "Ảnh")} actions={
+      <span className="flex gap-2">
+        {photos && photos.length > 0 && (
+          <button className={video ? btn.primary : btn.secondary} onClick={() => setVideo(!video)}>
+            {video ? L("← Back to editing", "← Quay lại chỉnh ảnh") : L("🎬 Make a video", "🎬 Tạo video từ ảnh")}
+          </button>
+        )}
+        <button className={video ? btn.secondary : btn.primary} disabled={importing} onClick={add}>{importing ? L("Adding…", "Đang thêm…") : L("+ Add photos", "+ Thêm ảnh")}</button>
+      </span>
+    }>
       {message && <p className="mb-2 text-sm text-amber-600">{message}</p>}
       {photos?.length === 0 && (
         <div className="rounded-xl border border-dashed border-zinc-300 p-8 text-center dark:border-zinc-700">
@@ -268,14 +424,16 @@ export default function PhotoEditor() {
           <ul className="flex gap-2 overflow-x-auto pb-1">
             {photos.map((p) => (
               <li key={p.id} className="group relative w-28 shrink-0">
-                <button className={`block w-full overflow-hidden rounded-lg border-2 ${p.id === selected ? "border-indigo-500" : "border-transparent"}`} onClick={() => setSelected(p.id)}
+                <button className={`block w-full overflow-hidden rounded-lg border-2 ${(video ? picked.includes(p.id) : p.id === selected) ? "border-indigo-500" : "border-transparent"}`}
+                  onClick={() => (video ? setPicked(picked.includes(p.id) ? picked.filter((x) => x !== p.id) : [...picked, p.id]) : setSelected(p.id))}
                   title={`${fileName(p.path)}${p.takenAt ? ` · ${dateTime(new Date(p.takenAt))}` : ""}`}>
                   <Thumb path={p.thumb} className="aspect-square w-full" />
                   {p.edits && Object.keys(p.edits).length > 0 && <span className="absolute bottom-1 left-1 rounded bg-indigo-600 px-1 text-[10px] text-white">✎</span>}
+                  {video && picked.includes(p.id) && <span className="absolute left-1 top-1 rounded-full bg-indigo-600 px-1.5 text-xs text-white">{picked.indexOf(p.id) + 1}</span>}
                 </button>
                 {confirming === p.id ? (
                   <span className="absolute inset-x-0 bottom-0 flex justify-center gap-2 rounded-b-lg bg-black/80 py-1 text-xs">
-                    <button className="text-red-400" onClick={() => removePhoto(p.id).then(() => { setConfirming(null); if (selected === p.id) setSelected(null); load(); }).catch((e) => setMessage(String(e)))}>{L("Remove", "Gỡ")}</button>
+                    <button className="text-red-400" onClick={() => removePhoto(p.id).then(() => { setConfirming(null); if (selected === p.id) setSelected(null); setPicked((x) => x.filter((i) => i !== p.id)); load(); }).catch((e) => setMessage(String(e)))}>{L("Remove", "Gỡ")}</button>
                     <button className="text-zinc-300" onClick={() => setConfirming(null)}>{L("Keep", "Giữ")}</button>
                   </span>
                 ) : (
@@ -286,7 +444,7 @@ export default function PhotoEditor() {
             ))}
           </ul>
           <div className="min-w-0 flex-1">
-            {current ? <Editor key={current.id} photo={current} onChanged={load} /> : (
+            {video ? <PhotoVideo photos={photos} picked={picked} setPicked={setPicked} /> : current ? <Editor key={current.id} photo={current} onChanged={load} /> : (
               <p className="p-8 text-center text-sm text-zinc-500">{L("Pick a photo on the left to edit it.", "Chọn một ảnh bên trái để chỉnh.")}</p>
             )}
           </div>

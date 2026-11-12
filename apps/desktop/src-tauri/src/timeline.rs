@@ -1,5 +1,5 @@
-//! Project timeline: an ordered list of trimmed segments of library media.
-//! Phase 3 keeps it manual; the Editing Core (Phase 6) will produce the same structure from an Editing Plan.
+//! Project timeline: an ordered list of trimmed segments of library videos and still photos (migration 11),
+//! each with an optional transition into it. Edited by hand or filled from an Editing Plan (`editing::apply`).
 
 use crate::db::err;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -10,19 +10,38 @@ use serde::Serialize;
 pub struct Clip {
     pub id: i64,
     pub project_id: i64,
-    pub media_id: i64,
+    /// Video clip: the library video; None for a photo.
+    pub media_id: Option<i64>,
+    /// Photo clip: the library photo (shown `out_ms - in_ms`, rendered with its edits); None for a video.
+    pub photo_id: Option<i64>,
     pub position: i64,
     pub in_ms: i64,
     pub out_ms: i64,
     /// Text shown at the start of this clip in exports (lower third).
     pub caption: Option<String>,
+    /// Transition into this clip (xfade name, one of `export::TRANSITIONS`); None = the project's transition.
+    pub transition: Option<String>,
+    pub transition_ms: Option<i64>,
+}
+
+impl Clip {
+    /// The user's transition into this clip, if set.
+    pub fn join(&self) -> Option<crate::export::Join> {
+        self.transition.clone().map(|t| (t, self.transition_ms.unwrap_or(0)))
+    }
 }
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Clip> {
-    Ok(Clip { id: r.get(0)?, project_id: r.get(1)?, media_id: r.get(2)?, position: r.get(3)?, in_ms: r.get(4)?, out_ms: r.get(5)?, caption: r.get(6)? })
+    Ok(Clip {
+        id: r.get(0)?, project_id: r.get(1)?, media_id: r.get(2)?, photo_id: r.get(3)?, position: r.get(4)?, in_ms: r.get(5)?, out_ms: r.get(6)?,
+        caption: r.get(7)?, transition: r.get(8)?, transition_ms: r.get(9)?,
+    })
 }
 
-const COLUMNS: &str = "id, project_id, media_id, position, in_ms, out_ms, caption";
+const COLUMNS: &str = "id, project_id, media_id, photo_id, position, in_ms, out_ms, caption, transition, transition_ms";
+/// How long a photo may stay on screen, and the default.
+pub const PHOTO_MS: (i64, i64) = (1_000, 20_000);
+pub const PHOTO_DEFAULT_MS: i64 = 4_000;
 
 fn touch(c: &Connection, project_id: i64) -> Result<(), String> {
     c.execute("UPDATE projects SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1", [project_id]).map_err(err)?;
@@ -45,6 +64,19 @@ pub fn add(c: &Connection, project_id: i64, media_id: i64, in_ms: i64, out_ms: i
     if in_ms < 0 || out_ms - in_ms < 100 {
         return Err("A clip must be at least 0.1 s long (In must be before Out).".into());
     }
+    insert(c, project_id, "media_id", media_id, in_ms, out_ms)
+}
+
+/// Appends a still photo shown `ms` (clamped to `PHOTO_MS`).
+pub fn add_photo(c: &Connection, project_id: i64, photo_id: i64, ms: i64) -> Result<Clip, String> {
+    let exists: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM photos WHERE id = ?1)", [photo_id], |r| r.get(0)).map_err(err)?;
+    if !exists {
+        return Err(format!("Photo {photo_id} not found."));
+    }
+    insert(c, project_id, "photo_id", photo_id, 0, ms.clamp(PHOTO_MS.0, PHOTO_MS.1))
+}
+
+fn insert(c: &Connection, project_id: i64, column: &str, source: i64, in_ms: i64, out_ms: i64) -> Result<Clip, String> {
     let exists: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)", [project_id], |r| r.get(0)).map_err(err)?;
     if !exists {
         return Err(format!("Project {project_id} not found."));
@@ -52,11 +84,11 @@ pub fn add(c: &Connection, project_id: i64, media_id: i64, in_ms: i64, out_ms: i
     let clip = c
         .query_row(
             &format!(
-                "INSERT INTO project_clips (project_id, media_id, position, in_ms, out_ms)
+                "INSERT INTO project_clips (project_id, {column}, position, in_ms, out_ms)
                  VALUES (?1, ?2, (SELECT COALESCE(MAX(position) + 1, 0) FROM project_clips WHERE project_id = ?1), ?3, ?4)
                  RETURNING {COLUMNS}"
             ),
-            params![project_id, media_id, in_ms, out_ms],
+            params![project_id, source, in_ms, out_ms],
             row,
         )
         .map_err(err)?;
@@ -64,11 +96,34 @@ pub fn add(c: &Connection, project_id: i64, media_id: i64, in_ms: i64, out_ms: i
     Ok(clip)
 }
 
-/// New In / Out of one clip (same rules as `add`: Out clamped to the media length, at least 0.1 s).
+/// Sets (name + length) or clears (None) the transition into one clip. Length 0 = hard cut.
+pub fn set_transition(c: &Connection, clip_id: i64, transition: Option<&str>, ms: i64) -> Result<Clip, String> {
+    if let Some(t) = transition {
+        if !crate::export::TRANSITIONS.contains(&t) {
+            return Err(format!("Unknown transition: {t}"));
+        }
+        if !(0..=3_000).contains(&ms) {
+            return Err("A transition lasts 0 to 3 s.".into());
+        }
+    }
+    let clip = c
+        .query_row(
+            &format!("UPDATE project_clips SET transition = ?2, transition_ms = ?3 WHERE id = ?1 RETURNING {COLUMNS}"),
+            params![clip_id, transition, transition.map(|_| ms)],
+            row,
+        )
+        .optional()
+        .map_err(err)?
+        .ok_or(format!("Clip {clip_id} not found."))?;
+    touch(c, clip.project_id)?;
+    Ok(clip)
+}
+
+/// New In / Out of one clip (same rules as `add`: Out clamped to the media length, at least 0.1 s; a photo's length to `PHOTO_MS`).
 pub fn set_range(c: &Connection, clip_id: i64, in_ms: i64, out_ms: i64) -> Result<Clip, String> {
     let (project_id, duration): (i64, i64) = c
         .query_row(
-            "SELECT p.project_id, m.duration_ms FROM project_clips p JOIN media m ON m.id = p.media_id WHERE p.id = ?1",
+            &format!("SELECT p.project_id, COALESCE(m.duration_ms, {}) FROM project_clips p LEFT JOIN media m ON m.id = p.media_id WHERE p.id = ?1", PHOTO_MS.1),
             [clip_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -172,6 +227,23 @@ mod tests {
         assert!(set_range(&c, id, -1, 1000).is_err());
         assert!(set_range(&c, 999, 0, 1000).is_err());
         assert_eq!(list(&c, p).unwrap()[0].in_ms, 2000, "failed updates change nothing");
+    }
+
+    #[test]
+    fn photos_and_per_join_transitions() {
+        let (c, p, m) = setup();
+        let photo = crate::photos::upsert(&c, r"E:\a.jpg", 1, None).unwrap();
+        add(&c, p, m, 0, 1000).unwrap();
+        let clip = add_photo(&c, p, photo, 60_000).unwrap();
+        assert_eq!((clip.media_id, clip.photo_id, clip.in_ms, clip.out_ms, clip.position), (None, Some(photo), 0, PHOTO_MS.1, 1), "length clamped");
+        assert!(add_photo(&c, p, 999, 4000).is_err());
+        assert_eq!(set_range(&c, clip.id, 0, 3_000).unwrap().out_ms, 3_000);
+        let t = set_transition(&c, clip.id, Some("fadeblack"), 1_200).unwrap();
+        assert_eq!(t.join(), Some(("fadeblack".to_string(), 1_200)));
+        assert!(set_transition(&c, clip.id, Some("spin"), 500).is_err());
+        assert!(set_transition(&c, clip.id, Some("fade"), 9_000).is_err());
+        assert_eq!(set_transition(&c, clip.id, None, 0).unwrap().join(), None, "back to the project's transition");
+        assert!(set_transition(&c, 999, None, 0).is_err());
     }
 
     #[test]

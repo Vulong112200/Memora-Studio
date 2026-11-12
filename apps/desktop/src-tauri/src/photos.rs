@@ -7,7 +7,7 @@ use crate::jobs::{Job, Outcome, Status};
 use crate::process::JobObject;
 use crate::worker::{self, Worker};
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -34,9 +34,12 @@ pub struct Photo {
     pub imported_at: String,
     /// `<cache>\photo\<id>\thumb.jpg` when it exists (set by `attach_thumbs`).
     pub thumb: Option<PathBuf>,
+    /// Observations stored (`photo_analysis`), so Smart edit can use the photo.
+    pub analyzed: bool,
 }
 
-const COLUMNS: &str = "id, path, size, width, height, taken_at, edits_json, imported_at";
+const COLUMNS: &str =
+    "id, path, size, width, height, taken_at, edits_json, imported_at, EXISTS(SELECT 1 FROM photo_analysis a WHERE a.photo_id = photos.id)";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Photo> {
     let edits: Option<String> = r.get(6)?;
@@ -50,6 +53,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Photo> {
         edits: edits.and_then(|e| serde_json::from_str(&e).ok()).unwrap_or(Value::Null),
         imported_at: r.get(7)?,
         thumb: None,
+        analyzed: r.get(8)?,
     })
 }
 
@@ -252,6 +256,199 @@ pub fn export(lane: &Lane, exports: &Path, photo: &Photo) -> Result<PathBuf, Str
     result.map(|()| out)
 }
 
+/// What the Editing Core knows about a photo: frame metrics of the edited photo (same scale as video proxies) and
+/// OpenCLIP tags / cues as a one-sample `MediaTags` (None when the model was not installed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Analysis {
+    pub metrics: crate::analysis::Sample,
+    pub tags: Option<crate::tagging::MediaTags>,
+}
+
+pub fn store_analysis(c: &Connection, id: i64, result: &Value) -> Result<(), String> {
+    let mut m = result["metrics"].clone();
+    m["atMs"] = json!(0);
+    let metrics: crate::analysis::Sample = serde_json::from_value(m).map_err(|e| format!("Invalid photo metrics: {e}"))?;
+    let tags: Option<crate::tagging::MediaTags> = match result.get("tags") {
+        Some(t) if !t.is_null() => Some(serde_json::from_value(t.clone()).map_err(|e| format!("Invalid photo tags: {e}"))?),
+        _ => None,
+    };
+    c.execute(
+        "INSERT INTO photo_analysis (photo_id, metrics_json, tags_json, model_id) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (photo_id) DO UPDATE SET metrics_json = excluded.metrics_json, tags_json = excluded.tags_json,
+            model_id = excluded.model_id, created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        params![id, serde_json::to_string(&metrics).unwrap(), tags.as_ref().map(|t| serde_json::to_string(t).unwrap()), tags.as_ref().map(|_| crate::tagging::MODEL_ID)],
+    )
+    .map_err(err)
+    .map(drop)
+}
+
+pub fn analyses(c: &Connection) -> Result<std::collections::HashMap<i64, Analysis>, String> {
+    let mut s = c.prepare("SELECT photo_id, metrics_json, tags_json FROM photo_analysis").map_err(err)?;
+    let rows = s.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))).map_err(err)?;
+    let mut out = std::collections::HashMap::new();
+    for row in rows {
+        let (id, m, t) = row.map_err(err)?;
+        if let Ok(metrics) = serde_json::from_str(&m) {
+            out.insert(id, Analysis { metrics, tags: t.and_then(|t| serde_json::from_str(&t).ok()) });
+        }
+    }
+    Ok(out)
+}
+
+/// Job `media.photo_analyze`, params `{"ids": [..]}`: worker `photo_analyze` on each photo as edited (metrics, and
+/// OpenCLIP tags when the model is installed), stored in `photo_analysis`. A photo that fails is reported, the rest go on.
+pub fn analyze_job(
+    job: &Job,
+    progress: &dyn Fn(u64, u64),
+    cancelled: &dyn Fn() -> bool,
+    env: &crate::media::MediaEnv,
+    ai: &mut dyn FnMut(&Job, &dyn Fn(u64, u64), &dyn Fn() -> bool) -> Outcome,
+) -> Outcome {
+    let ids: Vec<i64> = job.params["ids"].as_array().map(|a| a.iter().filter_map(Value::as_i64).collect()).unwrap_or_default();
+    let model_dir = env.with_db(|c| crate::models::ready_dir(c, crate::tagging::MODEL_ID)).ok().map(|(_, d)| d);
+    let (mut done, mut failed) = (vec![], vec![]);
+    for (i, &id) in ids.iter().enumerate() {
+        if cancelled() {
+            return Outcome::Cancelled;
+        }
+        progress(i as u64, ids.len() as u64);
+        let p = match env.with_db(|c| get(c, id)) {
+            Ok(p) => p,
+            Err(e) => {
+                failed.push(json!({"id": id, "error": e}));
+                continue;
+            }
+        };
+        let sub = Job {
+            id: job.id,
+            kind: "photo_analyze".into(),
+            params: json!({"path": p.path, "edits": p.edits, "modelDir": model_dir}),
+            status: Status::Running, done: 0, total: 0, result: None, error: None,
+        };
+        match ai(&sub, &|_, _| {}, cancelled) {
+            Outcome::Completed(r) => match env.with_db(|c| store_analysis(c, id, &r)) {
+                Ok(()) => done.push(id),
+                Err(e) => failed.push(json!({"id": id, "error": e})),
+            },
+            Outcome::Failed(e) => failed.push(json!({"id": id, "error": e})),
+            Outcome::Cancelled => return Outcome::Cancelled,
+        }
+    }
+    progress(ids.len() as u64, ids.len() as u64);
+    tracing::info!(done = done.len(), failed = failed.len(), tagged = model_dir.is_some(), "photos analysed");
+    Outcome::Completed(json!({"done": done, "failed": failed, "tagged": model_dir.is_some()}))
+}
+
+/// Long side of each photo rendered for a video: covers a 1920-px frame and a centre crop of a 3:2 photo into 9:16.
+const VIDEO_SIDE: i64 = 2880;
+
+/// Job `media.photo_video`, params `{"photoIds": [n…] (in order), "photoMs": n, "preset": "landscape", "options": export::Options, "name": "…"}`:
+/// each photo rendered with its edit stack (worker `photo_render`, into the render cache, deleted afterwards), then the
+/// stills go through the normal export (`export::finish`: transitions, look, titles, music, loudness, validation) to
+/// `<data root>\photos\exports\<name>-<preset>.mp4`. The photo files are never written.
+pub fn video_job(
+    job: &Job,
+    progress: &dyn Fn(u64, u64),
+    cancelled: &dyn Fn() -> bool,
+    env: &crate::media::MediaEnv,
+    root: &Path,
+    ai: &mut dyn FnMut(&Job, &dyn Fn(u64, u64), &dyn Fn() -> bool) -> Outcome,
+) -> Outcome {
+    use crate::export::{self, Preset};
+    let ids: Vec<i64> = job.params["photoIds"].as_array().map(|a| a.iter().filter_map(Value::as_i64).collect()).unwrap_or_default();
+    if ids.is_empty() {
+        return Outcome::Failed("Pick at least one photo.".into());
+    }
+    let preset_name = job.params["preset"].as_str().unwrap_or("landscape");
+    let preset = match Preset::parse(preset_name) {
+        Ok(p) => p,
+        Err(e) => return Outcome::Failed(e),
+    };
+    let o: export::Options = match serde_json::from_value(job.params["options"].clone()) {
+        Ok(o) => o,
+        Err(e) => return Outcome::Failed(format!("Invalid export options: {e}")),
+    };
+    let (lo, hi) = crate::timeline::PHOTO_MS;
+    let photo_ms = job.params["photoMs"].as_i64().unwrap_or(3_000).clamp(lo, hi);
+    let photos = match env.with_db(|c| ids.iter().map(|&id| get(c, id)).collect::<Result<Vec<_>, _>>()) {
+        Ok(p) => p,
+        Err(e) => return Outcome::Failed(e),
+    };
+    if let Some(p) = photos.iter().find(|p| !Path::new(&p.path).exists()) {
+        return Outcome::Failed(format!("Photo file is missing: {}", p.path));
+    }
+    let dir = env.cache.join("render");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return Outcome::Failed(format!("Cannot create {}: {e}", dir.display()));
+    }
+    // Rendering the stills is the first 20 % of the job.
+    const TOTAL: u64 = 1000;
+    let n = photos.len() as u64;
+    let mut stills = vec![]; // deleted when dropped, whatever the outcome
+    let mut segs = vec![];
+    for (i, p) in photos.iter().enumerate() {
+        if cancelled() {
+            return Outcome::Cancelled;
+        }
+        progress(i as u64 * 200 / n, TOTAL);
+        match still(job, ai, cancelled, &dir, p, photo_ms, i) {
+            Ok((seg, file)) => {
+                segs.push(seg);
+                stills.push(file);
+            }
+            Err(outcome) => return outcome,
+        }
+    }
+    let name = job.params["name"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("Photo video");
+    let safe: String = name.chars().map(|c| if "\\/:*?\"<>|".contains(c) || c.is_control() { '_' } else { c }).collect();
+    let planned = export::free_name(&root.join("photos").join("exports").join(format!("{safe}-{preset_name}.mp4")));
+    let target = preset.target(&segs[0].media);
+    tracing::info!(photos = segs.len(), photo_ms, "photo video");
+    let outcome = export::finish(env, &segs, target, preset_name, o, planned, &|d, t| progress(200 + d * 800 / t.max(1), TOTAL), cancelled);
+    drop(stills);
+    outcome
+}
+
+/// Media standing for a rendered still (`export::STILL`): id −photo id (`export::timeline_joins` keys), dated by the photo.
+pub fn still_media(p: &Photo, file: &Path, width: i64, height: i64, ms: i64) -> crate::media::Media {
+    let probe = crate::media::Probe {
+        duration_ms: ms, width, height, rotation: 0, fps: None, video_codec: crate::export::STILL.into(), audio_codec: None, audio_streams: 0,
+        bitrate: None, source_created_at: p.taken_at.clone(),
+    };
+    crate::media::Media {
+        id: -p.id, path: file.to_string_lossy().into(), size: 0, probe, imported_at: p.imported_at.clone(), thumb: None, proxy: None,
+        scene_count: None, transcribed: false, tags: None, mark: Default::default(),
+    }
+}
+
+/// Renders one photo with its edits (job worker `photo_render`, long side `VIDEO_SIDE`) to `dir\still-<job>-<pid>-<i>.jpg`
+/// (deleted when the returned guard drops) and returns it as a still segment of `ms`.
+pub fn still(
+    job: &Job,
+    ai: &mut dyn FnMut(&Job, &dyn Fn(u64, u64), &dyn Fn() -> bool) -> Outcome,
+    cancelled: &dyn Fn() -> bool,
+    dir: &Path,
+    p: &Photo,
+    ms: i64,
+    i: usize,
+) -> Result<(crate::export::Segment, crate::sounds::TempFile), Outcome> {
+    std::fs::create_dir_all(dir).map_err(|e| Outcome::Failed(format!("Cannot create {}: {e}", dir.display())))?;
+    let file = crate::sounds::TempFile(dir.join(format!("still-{}-{}-{i}.jpg", job.id, std::process::id())));
+    let sub = Job {
+        id: job.id,
+        kind: "photo_render".into(),
+        params: json!({"path": p.path, "edits": p.edits, "maxSide": VIDEO_SIDE, "out": file.0, "quality": 95}),
+        status: Status::Running, done: 0, total: 0, result: None, error: None,
+    };
+    let r = match ai(&sub, &|_, _| {}, cancelled) {
+        Outcome::Completed(r) => r,
+        Outcome::Failed(e) => return Err(Outcome::Failed(format!("{}: {e}", p.path))),
+        Outcome::Cancelled => return Err(Outcome::Cancelled),
+    };
+    let media = still_media(p, &file.0, r["outWidth"].as_i64().unwrap_or(0), r["outHeight"].as_i64().unwrap_or(0), ms);
+    Ok((crate::export::Segment { media, in_ms: 0, out_ms: ms, caption: None, speech: vec![], transition: None }, file))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,6 +523,109 @@ mod tests {
         assert_eq!(e2.file_name().unwrap(), "ảnh thử-edit-2.jpg", "an earlier export is never replaced");
         assert_eq!(std::fs::read(&src).unwrap(), original, "original untouched");
         assert!(std::fs::read_dir(&exports).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().ends_with(".part")));
+        drop(lane);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Real worker + FFmpeg: two photos (one edited, one portrait) → photo video, validated, stills removed, photos untouched.
+    #[test]
+    fn photo_video_with_real_worker() {
+        let ffmpeg = crate::media::tool_path(None, "ffmpeg.exe");
+        if worker::resolve(None).is_err() || !ffmpeg.exists() {
+            eprintln!("skipped: worker venv or FFmpeg not found");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("memora-photo-video-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (land, port) = (dir.join("land.jpg"), dir.join("port.png"));
+        for (f, size) in [(&land, "640x360"), (&port, "360x640")] {
+            let ok = std::process::Command::new(&ffmpeg).args(["-v", "error", "-f", "lavfi", "-i", &format!("testsrc2=s={size}"), "-frames:v", "1"]).arg(f).status().unwrap().success();
+            assert!(ok);
+        }
+        let original = std::fs::read(&land).unwrap();
+        let c = db();
+        let lane = Lane::new(|| None).unwrap();
+        let cache = dir.join("cache");
+        let ids = import(&c, &lane, &cache, &[land.to_string_lossy().into(), port.to_string_lossy().into()]).unwrap().ids;
+        with(&c, |c| set_edits(c, ids[0], &json!({"exposure": 25, "look": "warm"}))).unwrap();
+        let job_object = JobObject::new().unwrap();
+        let env = crate::media::MediaEnv {
+            ffprobe: crate::media::tool_path(None, "ffprobe.exe"), ffmpeg, cache: cache.clone(), job_object: &job_object, db: &c,
+        };
+        let mut ai = |j: &Job, _: &dyn Fn(u64, u64), _: &dyn Fn() -> bool| match lane.call(&j.kind, j.params.clone()) {
+            Ok(v) => Outcome::Completed(v),
+            Err(e) => Outcome::Failed(e),
+        };
+        let job = Job {
+            id: 7, kind: "media.photo_video".into(), status: Status::Running, done: 0, total: 0, result: None, error: None,
+            params: json!({"photoIds": [ids[1], ids[0]], "photoMs": 1500, "preset": "landscape", "name": "Thử",
+                "options": {"transitionMs": 500, "transition": "fade", "fade": true}}),
+        };
+        let Outcome::Completed(r) = video_job(&job, &|_, _| {}, &|| false, &env, &dir, &mut ai) else { panic!("photo video failed") };
+        assert!(r["validation"]["ok"].as_bool().unwrap(), "{r}");
+        assert_eq!((r["durationMs"].as_i64(), r["width"].as_i64()), (Some(2_500), Some(1920)), "two 1.5 s photos joined by 0.5 s");
+        assert_eq!(Path::new(r["path"].as_str().unwrap()), dir.join("photos").join("exports").join("Thử-landscape.mp4"));
+        assert!(std::fs::read_dir(cache.join("render")).unwrap().next().is_none(), "rendered stills removed");
+        assert_eq!(std::fs::read(&land).unwrap(), original, "photo untouched");
+        drop(lane);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Real worker + FFmpeg: a project timeline mixing a video clip and a photo with its own transition — export
+    /// (validated, photo stills removed) and a join preview.
+    #[test]
+    fn mixed_timeline_export_and_join_preview() {
+        let ffmpeg = crate::media::tool_path(None, "ffmpeg.exe");
+        let ffprobe = crate::media::tool_path(None, "ffprobe.exe");
+        if worker::resolve(None).is_err() || !ffmpeg.exists() || !ffprobe.exists() {
+            eprintln!("skipped: worker venv or FFmpeg not found");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("memora-mixed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (video, photo) = (dir.join("v.mp4"), dir.join("p.jpg"));
+        let run = |args: &[&str], out: &Path| assert!(std::process::Command::new(&ffmpeg).args(["-v", "error"]).args(args).arg(out).status().unwrap().success());
+        run(&["-f", "lavfi", "-i", "testsrc2=s=640x360:d=3:r=30", "-f", "lavfi", "-i", "sine=d=3", "-c:v", "libx264", "-c:a", "aac", "-shortest"], &video);
+        run(&["-f", "lavfi", "-i", "testsrc2=s=360x640", "-frames:v", "1"], &photo);
+        let c = db();
+        let job_object = JobObject::new().unwrap();
+        let cache = dir.join("cache");
+        let env = crate::media::MediaEnv { ffprobe, ffmpeg, cache: cache.clone(), job_object: &job_object, db: &c };
+        let raw = crate::media::run_ffprobe(&env.ffprobe, &video, &job_object).unwrap();
+        let probe = crate::media::parse_probe(&serde_json::from_str(&raw).unwrap()).unwrap();
+        let lane = Lane::new(|| None).unwrap();
+        let photo_id = import(&c, &lane, &cache, &[photo.to_string_lossy().into()]).unwrap().ids[0];
+        let project = with(&c, |c| {
+            let m = crate::media::upsert(c, &video.to_string_lossy(), 1, None, &probe, &raw)?;
+            let p = crate::projects::create(c, "Mixed")?;
+            crate::timeline::add(c, p.id, m.id, 0, 3_000)?;
+            let clip = crate::timeline::add_photo(c, p.id, photo_id, 2_000)?;
+            crate::timeline::set_transition(c, clip.id, Some("fadeblack"), 500)?;
+            Ok(p.id)
+        })
+        .unwrap();
+        assert_eq!(with(&c, |c| crate::export::timeline_joins(c, project)).unwrap(), [("fadeblack".to_string(), 500)]);
+        let mut ai = |j: &Job, _: &dyn Fn(u64, u64), _: &dyn Fn() -> bool| match lane.call(&j.kind, j.params.clone()) {
+            Ok(v) => Outcome::Completed(v),
+            Err(e) => Outcome::Failed(e),
+        };
+        let job = Job {
+            id: 9, kind: "media.export".into(), status: Status::Running, done: 0, total: 0, result: None, error: None,
+            params: json!({"projectId": project, "preset": "landscape", "options": {"transitionMs": 300, "transition": "fade"}}),
+        };
+        let Outcome::Completed(r) = crate::export::export_job(&job, &|_, _| {}, &|| false, &env, &dir.join("projects"), &mut ai) else { panic!("export failed") };
+        assert!(r["validation"]["ok"].as_bool().unwrap(), "{r}");
+        assert_eq!(r["durationMs"].as_i64(), Some(4_500), "3 s video + 2 s photo − 0.5 s fade through black");
+        assert!(std::fs::read_dir(cache.join("render")).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with("still-")), "stills removed");
+        let still = |p: &Photo, out: &Path| {
+            let r = lane.call("photo_render", json!({"path": p.path, "edits": p.edits, "maxSide": 640, "out": out}))?;
+            Ok((r["outWidth"].as_i64().unwrap_or(0), r["outHeight"].as_i64().unwrap_or(0)))
+        };
+        let preview = crate::export::preview_join(&env, project, 0, crate::export::Preset::Landscape, &still).unwrap();
+        assert!(preview.exists() && std::fs::metadata(&preview).unwrap().len() > 0);
+        assert!(crate::export::preview_join(&env, project, 1, crate::export::Preset::Landscape, &still).is_err(), "only one join");
         drop(lane);
         let _ = std::fs::remove_dir_all(dir);
     }

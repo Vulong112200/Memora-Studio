@@ -51,6 +51,8 @@ export function jobLabel(kind: string) {
     "media.tag": ["Recognising what is on screen (AI)", "Nhận diện nội dung hình (AI)"],
     "media.transcribe": ["Transcribing speech (AI)", "Nhận dạng lời nói (AI)"],
     "media.export": ["Exporting video", "Xuất video"],
+    "media.photo_video": ["Making a video from photos", "Tạo video từ ảnh"],
+    "media.photo_analyze": ["Analysing photos (quality, content)", "Phân tích ảnh (chất lượng, nội dung)"],
     "models.install": ["Installing an AI model", "Cài model AI"],
     validate_devices: ["Checking AI devices", "Kiểm tra thiết bị AI"],
   };

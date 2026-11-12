@@ -226,7 +226,7 @@ fn dispatch(ctx: &Ctx, a: &Args) -> Result<String, String> {
                 target_ms: a.flags.get("target").map(|v| ms(v)).transpose()?,
                 ..Default::default()
             };
-            let p = editing::plan_with(&st, &editing::gather(c, from, to)?, &wishes);
+            let p = editing::plan_with_photos(&st, &editing::gather(c, from, to)?, &editing::gather_photos(c, from, to)?, &wishes);
             editing::save(c, project, &p)?;
             show_plan(c, project)
         }),
@@ -423,7 +423,7 @@ fn show_plan(c: &Connection, project: i64) -> Result<String, String> {
     for (i, cl) in p.clips.iter().enumerate() {
         out += &format!(
             "{i:>2}. #{} {} {}–{} ({:.1} s) rank {:.2} | {}\n",
-            cl.media_id, files.get(&cl.media_id).map_or("?", |s| s.as_str()), t(cl.in_ms), t(cl.out_ms),
+            cl.media_id, cl.photo_id.map(|p| format!("photo {p}")).or_else(|| files.get(&cl.media_id).cloned()).unwrap_or("?".into()), t(cl.in_ms), t(cl.out_ms),
             (cl.out_ms - cl.in_ms) as f64 / 1000.0, cl.rank, cl.reasons.join("; ")
         );
     }
@@ -439,17 +439,25 @@ fn show_plan(c: &Connection, project: i64) -> Result<String, String> {
 fn show_timeline(c: &Connection, project: i64) -> Result<String, String> {
     let clips = timeline::list(c, project)?;
     let files = names(c)?;
-    let o = export::load_options(c, project);
-    let recorded: HashMap<i64, Option<String>> = media::list(c)?.into_iter().map(|m| (m.id, m.probe.source_created_at)).collect();
-    let jc: Vec<export::JoinClip> = clips.iter().map(|x| (x.media_id, recorded.get(&x.media_id).and_then(|r| r.as_deref()), x.in_ms, x.out_ms)).collect();
-    let total = clips.iter().map(|x| x.out_ms - x.in_ms).sum::<i64>() - export::joins(&o.transition, o.transition_ms, &jc).iter().map(|j| j.1).sum::<i64>();
+    let joins = export::timeline_joins(c, project)?;
+    let total = clips.iter().map(|x| x.out_ms - x.in_ms).sum::<i64>() - joins.iter().map(|j| j.1).sum::<i64>();
     let mut out = format!("timeline #{project} — {} clips, {:.1} s\n", clips.len(), total as f64 / 1000.0);
-    for x in &clips {
-        let concept = tagging::get(c, x.media_id)?.map(|tg| top(&tagging::summarize(&tg, x.in_ms, x.out_ms, 0.1), 1)).unwrap_or_default();
+    for (i, x) in clips.iter().enumerate() {
+        if i > 0 {
+            let (name, ms) = &joins[i - 1];
+            out += &format!("   ↳ {name} {:.1} s{}\n", *ms as f64 / 1000.0, if x.transition.is_some() { " (set on this clip)" } else { "" });
+        }
+        let source = match (x.media_id, x.photo_id) {
+            (Some(m), _) => {
+                let concept = tagging::get(c, m)?.map(|tg| top(&tagging::summarize(&tg, x.in_ms, x.out_ms, 0.1), 1)).unwrap_or_default();
+                format!("#{m} {} {}–{} {concept}", files.get(&m).map_or("?", |s| s.as_str()), t(x.in_ms), t(x.out_ms)).trim_end().to_string()
+            }
+            (None, Some(p)) => format!("photo #{p} {}", crate::photos::get(c, p).map(|p| p.path).unwrap_or_else(|_| "?".into())),
+            _ => "?".into(),
+        };
         out += &format!(
-            "clip {:<4} #{} {} {}–{} ({:.1} s) {} {}\n",
-            x.id, x.media_id, files.get(&x.media_id).map_or("?", |s| s.as_str()), t(x.in_ms), t(x.out_ms),
-            (x.out_ms - x.in_ms) as f64 / 1000.0, concept, x.caption.as_deref().map(|s| format!("\"{s}\"")).unwrap_or_default()
+            "clip {:<4} {source} ({:.1} s) {}\n",
+            x.id, (x.out_ms - x.in_ms) as f64 / 1000.0, x.caption.as_deref().map(|s| format!("\"{s}\"")).unwrap_or_default()
         );
     }
     Ok(out)

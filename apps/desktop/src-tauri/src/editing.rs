@@ -211,6 +211,9 @@ pub struct PlanClip {
     /// Main visual concepts (Vietnamese labels).
     pub tags: Vec<String>,
     pub reasons: Vec<String>,
+    /// A still photo (shown `out_ms - in_ms`); `media_id` is then −photo id (see `export::timeline_joins`).
+    #[serde(default)]
+    pub photo_id: Option<i64>,
 }
 
 /// The user's own requests on top of a style (concept names match tag `en` or `vi`, case-insensitive).
@@ -236,6 +239,10 @@ pub struct Wishes {
     pub captions: Option<bool>,
     /// "none" = no music; "low" | "medium" | "high" | "any" = the best-suited library track of that energy.
     pub music: Option<String>,
+    /// Photos between the video clips: "none" | "fewer" | "yes" | "more" (None = like "yes" when there are photos).
+    pub photos: Option<String>,
+    /// Seconds each photo stays on screen (ms).
+    pub photo_ms: Option<i64>,
     /// The sentence these wishes were read from (request box), kept for the record.
     pub request: String,
 }
@@ -478,6 +485,7 @@ fn candidates(src: &Source, st: &Style, wishes: &Wishes) -> (Vec<Candidate>, usi
                     rank,
                     tags: tags.iter().take(3).map(|t| t.vi.clone()).collect(),
                     reasons,
+                    photo_id: None,
                 },
             });
         }
@@ -578,7 +586,14 @@ const COVER_CONCEPT_MS: i64 = 20_000;
 const COVER_SLICE_MS: i64 = 8 * 60_000;
 
 /// Plan for `st` with the user's wishes (preferred / avoided concepts, length).
+#[cfg(test)]
 pub fn plan_with(st: &Style, sources: &[Source], wishes: &Wishes) -> Plan {
+    plan_with_photos(st, sources, &[], wishes)
+}
+
+/// A plan from videos and photos: photos are chosen first (`pick_photos`, part of the length), the videos fill the
+/// rest, then each photo is placed among the clips by the time it was taken.
+pub fn plan_with_photos(st: &Style, sources: &[Source], photos: &[PhotoSource], wishes: &Wishes) -> Plan {
     let mut notes = vec![];
     let journey = st.id == "journey_recap";
     let auto_ms = (journey && wishes.target_ms.is_none_or(|t| t <= 0)).then(|| {
@@ -588,7 +603,12 @@ pub fn plan_with(st: &Style, sources: &[Source], wishes: &Wishes) -> Plan {
         ms
     });
     let st = &Style { target_ms: wishes.target_ms.filter(|&t| t > 0).or(auto_ms).unwrap_or(st.target_ms), ..st.clone() };
-    let mut skipped = vec![];
+    let full_target = st.target_ms;
+    let (picked, photo_notes, photo_skipped) = pick_photos(sources, photos, wishes, full_target);
+    notes.extend(photo_notes);
+    let photo_total: i64 = picked.iter().map(|p| p.clip.out_ms - p.clip.in_ms).sum();
+    let st = &Style { target_ms: (full_target - photo_total).max(full_target / 2), ..st.clone() };
+    let mut skipped = photo_skipped;
     let mut pool = vec![];
     let (mut avoided, mut tilted) = (0, 0);
     for s in sources {
@@ -720,13 +740,14 @@ pub fn plan_with(st: &Style, sources: &[Source], wishes: &Wishes) -> Plan {
         }
     }
 
-    let clips = merge_near(chosen.into_iter().map(|c| c.clip.clone()).collect());
+    let mut clips = merge_near(chosen.into_iter().map(|c| c.clip.clone()).collect());
+    place_photos(&mut clips, picked, sources, !st.open_with.is_empty() || st.opening.starts_with("Strongest"), !st.end_with.is_empty());
     let suggested_title = suggest_title(&clips, sources);
     Plan {
         style: st.id.into(),
         wishes: wishes.clone(),
-        target_ms: st.target_ms,
-        total_ms: output_ms(&clips, sources, st),
+        target_ms: full_target,
+        total_ms: output_ms(&clips, sources, photos, st),
         transition_ms: st.transition_ms,
         export_preset: wishes.preset.clone().unwrap_or_else(|| st.export_preset.into()),
         clips,
@@ -737,13 +758,202 @@ pub fn plan_with(st: &Style, sources: &[Source], wishes: &Wishes) -> Plan {
     }
 }
 
+// ------------------------------------------------------------------ photos
+
+/// A library photo with its observations (None until analysed: job `media.photo_analyze`).
+pub struct PhotoSource {
+    pub photo: crate::photos::Photo,
+    pub analysis: Option<crate::photos::Analysis>,
+}
+
+/// Library photos taken within [from, to] (their own local date, YYYY-MM-DD), with their observations.
+pub fn gather_photos(c: &Connection, from: Option<&str>, to: Option<&str>) -> Result<Vec<PhotoSource>, String> {
+    let mut found = crate::photos::analyses(c)?;
+    Ok(crate::photos::list(c)?
+        .into_iter()
+        .filter(|p| {
+            let d: String = p.taken_at.as_deref().unwrap_or(&p.imported_at).chars().take(10).collect();
+            !(from.is_some_and(|f| d.as_str() < f) || to.is_some_and(|t| d.as_str() > t))
+        })
+        .map(|p| PhotoSource { analysis: found.remove(&p.id), photo: p })
+        .collect())
+}
+
+/// Seconds a photo stays on screen unless the request says otherwise.
+pub(crate) const PHOTO_MS: i64 = 4_000;
+/// Share of the length given to photos: by default, "fewer", "more" (initial values; the owner reviews them).
+const PHOTO_SHARE: f64 = 0.25;
+const PHOTO_SHARE_FEWER: f64 = 0.12;
+const PHOTO_SHARE_MORE: f64 = 0.4;
+/// Photos taken this long before the first / after the last video still belong to the trip.
+const PHOTO_TRIP_MARGIN_MS: i64 = 3 * 3_600_000;
+/// A bad-shot concept (finger, blurry…) at least this likely leaves the photo out.
+const PHOTO_BAD_SHOT: f64 = 0.3;
+
+struct PickedPhoto {
+    clip: PlanClip,
+    at: i64,
+}
+
+/// Chooses photos for a plan: taken during the trip (the analysed videos' recording span ± `PHOTO_TRIP_MARGIN_MS`;
+/// all photos when there is no video), not blurry / dark / overexposed / a bad shot / an avoided concept, one of each
+/// near-identical picture (dHash), at most the photo share of the length, spread evenly over the trip.
+fn pick_photos(sources: &[Source], photos: &[PhotoSource], wishes: &Wishes, target_ms: i64) -> (Vec<PickedPhoto>, Vec<String>, Vec<String>) {
+    let (mut notes, mut skipped) = (vec![], vec![]);
+    if photos.is_empty() {
+        return (vec![], notes, skipped);
+    }
+    if wishes.photos.as_deref() == Some("none") {
+        notes.push(format!("{} photos left out: you asked for video only", photos.len()));
+        return (vec![], notes, skipped);
+    }
+    let spans: Vec<(i64, i64)> = sources
+        .iter()
+        .filter(|s| !s.excluded && !s.scenes.is_empty())
+        .filter_map(|s| crate::export::unix_ms(s.media.probe.source_created_at.as_deref()?).map(|t| (t, t + s.media.probe.duration_ms)))
+        .collect();
+    let trip = spans.iter().map(|s| s.0).min().zip(spans.iter().map(|s| s.1).max());
+    let photo_ms = wishes.photo_ms.unwrap_or(PHOTO_MS).clamp(crate::timeline::PHOTO_MS.0, crate::timeline::PHOTO_MS.1);
+    let (mut unanalysed, mut other_days, mut avoided) = (0, 0, 0);
+    let mut usable: Vec<(f64, i64, &PhotoSource, Vec<tagging::TagScore>)> = vec![];
+    for p in photos {
+        let name = p.photo.path.rsplit(['\\', '/']).next().unwrap_or(&p.photo.path).to_string();
+        let Some(a) = &p.analysis else {
+            unanalysed += 1;
+            continue;
+        };
+        let at = p.photo.taken_at.as_deref().and_then(crate::export::unix_ms);
+        match (trip, at) {
+            (Some((first, last)), Some(t)) if t < first - PHOTO_TRIP_MARGIN_MS || t > last + PHOTO_TRIP_MARGIN_MS => {
+                other_days += 1;
+                continue;
+            }
+            (Some(_), None) => {
+                other_days += 1;
+                continue;
+            }
+            _ => {}
+        }
+        let (tech, flags) = scoring::technical(std::slice::from_ref(&a.metrics), 0.0);
+        if let Some(f) = flags.iter().find(|f| ["black", "blurry", "dark", "overexposed"].contains(f)) {
+            skipped.push(format!("{name}: photo {f}"));
+            continue;
+        }
+        let tags = a.tags.as_ref().map(|t| tagging::summarize(t, 0, 1, 0.0)).unwrap_or_default();
+        if let Some(bad) = tags.iter().find(|t| t.negative && t.score >= PHOTO_BAD_SHOT) {
+            skipped.push(format!("{name}: photo looks like \"{}\" ({:.0}%)", bad.vi, bad.score * 100.0));
+            continue;
+        }
+        if tags.iter().any(|t| t.score >= AVOID_MIN && named(t, &wishes.avoid)) {
+            avoided += 1;
+            continue;
+        }
+        let prefer: f64 = tags.iter().filter(|t| named(t, &wishes.prefer)).map(|t| t.score).sum::<f64>().min(1.0);
+        let less: f64 = tags.iter().filter(|t| named(t, &wishes.less)).map(|t| t.score).sum::<f64>().min(1.0);
+        let rank = tech.total * (1.0 + PREFER_BOOST * prefer) * (1.0 - LESS_CUT * less);
+        usable.push((rank, at.unwrap_or(0), p, tags));
+    }
+    // One of each near-identical picture: the best ranked.
+    usable.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.2.photo.id.cmp(&b.2.photo.id)));
+    let mut kept: Vec<(f64, i64, &PhotoSource, Vec<tagging::TagScore>)> = vec![];
+    for u in usable {
+        let h = &u.2.analysis.as_ref().unwrap().metrics.dhash;
+        if kept.iter().any(|k| scoring::hamming(h, &k.2.analysis.as_ref().unwrap().metrics.dhash).is_some_and(|d| d <= SAME_PICTURE)) {
+            skipped.push(format!("{}: same picture as another photo", u.2.photo.path.rsplit(['\\', '/']).next().unwrap_or("")));
+            continue;
+        }
+        kept.push(u);
+    }
+    let share = match wishes.photos.as_deref() {
+        Some("fewer") => PHOTO_SHARE_FEWER,
+        Some("more") => PHOTO_SHARE_MORE,
+        _ => PHOTO_SHARE,
+    };
+    let budget = if trip.is_some() { ((target_ms as f64 * share) as i64 / photo_ms).max(1) as usize } else { (target_ms / photo_ms).max(1) as usize };
+    kept.sort_by_key(|k| (k.1, k.2.photo.id));
+    let usable_n = kept.len();
+    if kept.len() > budget {
+        // Even coverage: the best photo of each of `budget` equal runs in time order.
+        let n = kept.len();
+        let mut chosen = vec![];
+        for b in 0..budget {
+            let run = &kept[b * n / budget..(b + 1) * n / budget];
+            if let Some(best) = run.iter().max_by(|x, y| x.0.total_cmp(&y.0)) {
+                chosen.push(best.clone());
+            }
+        }
+        kept = chosen;
+    }
+    if unanalysed > 0 {
+        notes.push(format!("{unanalysed} photos not analysed yet (open the Photos page to analyse them)"));
+    }
+    if other_days > 0 {
+        notes.push(format!("{other_days} photos taken outside this trip's recording time left out"));
+    }
+    if avoided > 0 {
+        skipped.push(format!("{avoided} photos left out: they show {}", wishes.avoid.join(", ")));
+    }
+    if !kept.is_empty() {
+        notes.push(format!("{} of {usable_n} usable photos used, {} s each, placed by the time they were taken", kept.len(), photo_ms / 1000));
+    }
+    let picked = kept
+        .into_iter()
+        .map(|(rank, at, p, tags)| {
+            let a = p.analysis.as_ref().unwrap();
+            let (tech, _) = scoring::technical(std::slice::from_ref(&a.metrics), 0.0);
+            let content: Vec<&tagging::TagScore> = tags.iter().filter(|t| !t.negative).collect();
+            let mut reasons = vec![format!("photo · technical {:.0}", tech.total * 100.0)];
+            reasons.extend(content.iter().take(2).map(|t| format!("{} ({:.0}%)", t.vi, t.score * 100.0)));
+            PickedPhoto {
+                at,
+                clip: PlanClip {
+                    media_id: -p.photo.id,
+                    scene_index: -1,
+                    in_ms: 0,
+                    out_ms: photo_ms,
+                    scores: Scores { technical: tech.total, semantic: content.first().map_or(0.0, |t| t.score), speech: 0.0, favorite: 0.0 },
+                    rank,
+                    tags: content.iter().take(3).map(|t| t.vi.clone()).collect(),
+                    reasons,
+                    photo_id: Some(p.photo.id),
+                },
+            }
+        })
+        .collect();
+    (picked, notes, skipped)
+}
+
+/// Puts each photo after the last clip recorded before it was taken (the opening clip stays first, the ending clip last).
+fn place_photos(clips: &mut Vec<PlanClip>, mut picked: Vec<PickedPhoto>, sources: &[Source], keep_first: bool, keep_last: bool) {
+    let start: HashMap<i64, i64> =
+        sources.iter().filter_map(|s| Some((s.media.id, crate::export::unix_ms(s.media.probe.source_created_at.as_deref()?)?))).collect();
+    let mut at: HashMap<i64, i64> = HashMap::new(); // photo clips already placed: media id (−photo) → taken
+    picked.sort_by_key(|p| p.at);
+    for p in picked {
+        let video_clips = clips.len();
+        let mut i = clips
+            .iter()
+            .rposition(|c| at.get(&c.media_id).copied().or_else(|| start.get(&c.media_id).map(|t| t + c.in_ms)).is_some_and(|t| t <= p.at))
+            .map_or(0, |k| k + 1);
+        if keep_first && video_clips > 0 {
+            i = i.max(1);
+        }
+        if keep_last && video_clips > 2 {
+            i = i.min(video_clips - 1);
+        }
+        at.insert(p.clip.media_id, p.at);
+        clips.insert(i, p.clip);
+    }
+}
+
 fn clock(ms: i64) -> String {
     format!("{}:{:02}", ms / 60_000, ms / 1000 % 60)
 }
 
 /// Length of the exported video: clip lengths minus the style's transitions, with the same rules as export.
-fn output_ms(clips: &[PlanClip], sources: &[Source], st: &Style) -> i64 {
-    let recorded: HashMap<i64, Option<&str>> = sources.iter().map(|s| (s.media.id, s.media.probe.source_created_at.as_deref())).collect();
+fn output_ms(clips: &[PlanClip], sources: &[Source], photos: &[PhotoSource], st: &Style) -> i64 {
+    let mut recorded: HashMap<i64, Option<&str>> = sources.iter().map(|s| (s.media.id, s.media.probe.source_created_at.as_deref())).collect();
+    recorded.extend(photos.iter().map(|p| (-p.photo.id, p.photo.taken_at.as_deref())));
     let joins: Vec<crate::export::JoinClip> = clips.iter().map(|c| (c.media_id, recorded.get(&c.media_id).copied().flatten(), c.in_ms, c.out_ms)).collect();
     clips.iter().map(|c| c.out_ms - c.in_ms).sum::<i64>() - crate::export::joins(st.transition, st.transition_ms, &joins).iter().map(|j| j.1).sum::<i64>()
 }
@@ -853,7 +1063,10 @@ pub fn apply(c: &Connection, project_id: i64, keep: &[usize]) -> Result<usize, S
     let mut n = 0;
     for &i in keep {
         let clip = p.clips.get(i).ok_or(format!("No clip #{i} in the plan"))?;
-        crate::timeline::add(&tx, project_id, clip.media_id, clip.in_ms, clip.out_ms)?;
+        match clip.photo_id {
+            Some(photo) => crate::timeline::add_photo(&tx, project_id, photo, clip.out_ms - clip.in_ms).map(drop)?,
+            None => crate::timeline::add(&tx, project_id, clip.media_id, clip.in_ms, clip.out_ms).map(drop)?,
+        }
         n += 1;
     }
     tx.commit().map_err(err)?;
@@ -897,6 +1110,57 @@ mod tests {
 
     fn src(m: Media, scenes: Vec<ScoredScene>) -> Source {
         Source { media: m, scenes, tags: None, transcript: None, favorite: false, excluded: false }
+    }
+
+    fn photo(id: i64, taken: &str, sharpness: f64, dhash: &str, analysed: bool) -> PhotoSource {
+        PhotoSource {
+            photo: crate::photos::Photo {
+                id, path: format!(r"E:\p{id}.jpg"), size: 1, width: Some(4000), height: Some(3000), taken_at: Some(taken.into()),
+                edits: serde_json::Value::Null, imported_at: "2026-11-01T00:00:00Z".into(), thumb: None, analyzed: analysed,
+            },
+            analysis: analysed.then(|| crate::photos::Analysis {
+                metrics: Sample { at_ms: 0, sharpness, brightness: 0.45, contrast: 0.2, clip_low: 0.0, clip_high: 0.0, black: false, dhash: dhash.into() },
+                tags: Some(MediaTags {
+                    device: "GPU".into(),
+                    tags: vec![TagName { en: "river".into(), vi: "sông".into(), negative: false }],
+                    cues: vec![],
+                    samples: vec![TagSample { at_ms: 0, tags: vec![(0, 0.8)], cues: vec![] }],
+                }),
+            }),
+        }
+    }
+
+    #[test]
+    fn photos_chosen_by_quality_and_placed_by_time_taken() {
+        let st = style("journey_recap").unwrap();
+        let sources = vec![
+            src(media(1, "2026-02-20", 600_000), vec![scene(1, 0, 0, 600_000, 0.9)]),
+            Source { media: Media { probe: Probe { source_created_at: Some("2026-02-20T12:00:00Z".into()), ..media(2, "2026-02-20", 600_000).probe }, ..media(2, "2026-02-20", 600_000) },
+                ..src(media(2, "2026-02-20", 600_000), vec![scene(2, 0, 0, 600_000, 0.9)]) },
+        ];
+        let photos = vec![
+            photo(1, "2026-02-20T18:30:00+07:00", 5_000.0, "ece8ec6e6ae47351", true), // 11:30 UTC: between the two videos
+            photo(2, "2026-02-20T18:31:00+07:00", 10.0, "0000000000000000", true),  // blurry
+            photo(3, "2026-02-20T18:32:00+07:00", 3_000.0, "ece8ec6e6ae47350", true), // same picture as 1, softer
+            photo(4, "2026-03-01T09:00:00+07:00", 5_000.0, "ffffffffffffffff", true), // another trip
+            photo(5, "2026-02-20T18:33:00+07:00", 5_000.0, "1234567812345678", false), // not analysed
+        ];
+        let p = plan_with_photos(&st, &sources, &photos, &Wishes::default());
+        let at: Vec<usize> = p.clips.iter().enumerate().filter(|(_, c)| c.photo_id.is_some()).map(|(i, _)| i).collect();
+        assert_eq!(at.len(), 1, "{:?}", p.clips.iter().map(|c| (c.media_id, c.in_ms)).collect::<Vec<_>>());
+        let photo_clip = &p.clips[at[0]];
+        assert_eq!((photo_clip.photo_id, photo_clip.media_id, photo_clip.out_ms - photo_clip.in_ms), (Some(1), -1, PHOTO_MS));
+        assert!(p.clips[..at[0]].iter().all(|c| c.media_id == 1) && p.clips[at[0] + 1..].iter().all(|c| c.media_id == 2), "taken between the two recordings");
+        assert!(p.skipped.iter().any(|s| s.contains("p2.jpg: photo blurry")), "{:?}", p.skipped);
+        assert!(p.skipped.iter().any(|s| s.contains("p3.jpg: same picture")));
+        assert!(p.notes.iter().any(|n| n.contains("1 photos taken outside")) && p.notes.iter().any(|n| n.contains("1 photos not analysed")), "{:?}", p.notes);
+        let videos: i64 = p.clips.iter().filter(|c| c.photo_id.is_none()).map(|c| c.out_ms - c.in_ms).sum();
+        assert!(videos + PHOTO_MS <= p.target_ms + st.clip_max_ms, "photos are part of the length");
+
+        let none = plan_with_photos(&st, &sources, &photos, &Wishes { photos: Some("none".into()), ..Wishes::default() });
+        assert!(none.clips.iter().all(|c| c.photo_id.is_none()) && none.notes.iter().any(|n| n.contains("video only")));
+        let longer = plan_with_photos(&st, &sources, &photos, &Wishes { photo_ms: Some(6_000), ..Wishes::default() });
+        assert_eq!(longer.clips.iter().find(|c| c.photo_id.is_some()).map(|c| c.out_ms), Some(6_000));
     }
 
     #[test]
@@ -1065,7 +1329,7 @@ mod tests {
     #[test]
     fn near_clips_merge() {
         let c = |a: i64, b: i64, m: i64| PlanClip { media_id: m, scene_index: 0, in_ms: a, out_ms: b, scores: Scores { technical: 1.0, semantic: 1.0, speech: 0.0, favorite: 0.0 },
-            rank: 0.5, tags: vec![], reasons: vec![] };
+            rank: 0.5, tags: vec![], reasons: vec![], photo_id: None };
         let merged = merge_near(vec![c(0, 4_000, 1), c(5_000, 9_000, 1), c(20_000, 24_000, 1), c(24_500, 26_000, 2)]);
         assert_eq!(merged.iter().map(|x| (x.media_id, x.in_ms, x.out_ms)).collect::<Vec<_>>(), [(1, 0, 9_000), (1, 20_000, 24_000), (2, 24_500, 26_000)]);
     }

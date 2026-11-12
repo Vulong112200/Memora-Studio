@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
-  applyPlan, generatePlan, getPlan, interpretRequest, listClips, listMedia, listStyles, submitJob,
-  type EditingStyle, type Media, type Plan, type Project, type RequestReading,
+  applyPlan, generatePlan, getPlan, interpretRequest, listClips, listMedia, listPhotos, listStyles, submitJob,
+  type EditingStyle, type Media, type Photo, type Plan, type Project, type RequestReading,
 } from "./api";
 import { clock } from "./Timeline";
 import { L } from "./i18n";
@@ -61,6 +61,7 @@ export default function EditingPlan({ project, onApplied }: { project: Project; 
   const [plan, setPlan] = useState<Plan | null>(null);
   const [order, setOrder] = useState<number[]>([]); // indexes into plan.clips the user keeps, in order
   const [media, setMedia] = useState<Map<number, Media>>(new Map());
+  const [photos, setPhotos] = useState<Map<number, Photo>>(new Map());
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [request, setRequest] = useState("");
@@ -70,6 +71,7 @@ export default function EditingPlan({ project, onApplied }: { project: Project; 
   useEffect(() => {
     listStyles().then(setStyles).catch((e) => setMessage(String(e)));
     listMedia().then((m) => setMedia(new Map(m.map((x) => [x.id, x])))).catch((e) => setMessage(String(e)));
+    listPhotos().then((p) => setPhotos(new Map(p.map((x) => [x.id, x])))).catch((e) => setMessage(String(e)));
     getPlan(project.id).then((p) => {
       show(p);
       if (p?.wishes?.request) setRequest(p.wishes.request);
@@ -174,13 +176,15 @@ export default function EditingPlan({ project, onApplied }: { project: Project; 
           <ol className="mt-2 max-h-[28rem] divide-y pr-3 divide-zinc-200 overflow-y-auto dark:divide-zinc-800">
             {order.map((i, pos) => {
               const c = plan.clips[i];
-              const m = media.get(c.mediaId);
+              const ph = c.photoId != null ? photos.get(c.photoId) : undefined;
+              const m = c.photoId != null ? undefined : media.get(c.mediaId);
+              const file = ph ? fileName(ph.path) : m ? fileName(m.path) : "";
               return (
                 <li key={i} className="flex items-center gap-3 py-1.5 text-sm">
                   <span className="w-5 text-right text-xs text-zinc-500">{pos + 1}</span>
-                  <Thumb path={m?.thumb} />
+                  <Thumb path={ph ? ph.thumb : m?.thumb} />
                   <div className="min-w-0 flex-1">
-                    <p className="truncate" title={m?.path}>{c.tags[0] ?? (m ? fileName(m.path) : `#${c.mediaId}`)} <span className="font-mono text-xs text-zinc-500">{m ? fileName(m.path) : ""} {clock(c.inMs)}–{clock(c.outMs)}</span></p>
+                    <p className="truncate" title={ph?.path ?? m?.path}>{ph ? "🖼 " : ""}{c.tags[0] ?? (file || `#${c.mediaId}`)} <span className="font-mono text-xs text-zinc-500">{file} {ph ? `${(c.outMs - c.inMs) / 1000} s` : `${clock(c.inMs)}–${clock(c.outMs)}`}</span></p>
                     <p className="truncate text-xs text-zinc-500" title={c.reasons.join(" · ")}>{c.reasons.join(" · ")}</p>
                   </div>
                   <span className="whitespace-nowrap font-mono text-xs text-zinc-500" title={L("technical / on screen / speech / favorite", "kỹ thuật / nội dung / lời nói / yêu thích")}>

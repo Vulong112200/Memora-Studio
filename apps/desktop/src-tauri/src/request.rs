@@ -144,6 +144,17 @@ const MUSIC: &[(&str, &[&str])] = &[
     ("any", &["có nhạc", "co nhac", "nhạc nền", "nhac nen", "nhạc", "music"]),
 ];
 /// Extra words for a tag (`en` name) besides its English / Vietnamese names.
+/// Photos in the plan (mixed timelines). "ảnh tự sướng" (selfie) is a concept, not these.
+const PHOTOS: &[(&str, &[&str])] = &[
+    ("none", &["không dùng ảnh", "khong dung anh", "không có ảnh", "khong co anh", "không ảnh", "khong anh", "bỏ ảnh", "bo anh",
+        "chỉ video", "chi video", "chỉ dùng video", "chi dung video", "no photos", "without photos", "videos only", "only videos"]),
+    ("more", &["nhiều ảnh", "nhieu anh", "thêm nhiều ảnh", "them nhieu anh", "more photos"]),
+    ("fewer", &["ít ảnh", "it anh", "bớt ảnh", "bot anh", "fewer photos"]),
+    ("yes", &["thêm ảnh", "them anh", "có ảnh", "co anh", "kèm ảnh", "kem anh", "dùng ảnh", "dung anh", "cả ảnh", "ca anh",
+        "with photos", "add photos", "photos too"]),
+];
+const PHOTO_EACH: &[&str] = &["mỗi ảnh", "moi anh", "mỗi tấm", "moi tam", "each photo", "per photo"];
+
 const ALIASES: &[(&str, &[&str])] = &[
     ("bicycle", &["đạp xe", "dap xe", "cycling", "biking"]),
     ("hiking trail", &["đi bộ trong rừng", "di bo trong rung", "trekking", "hiking"]),
@@ -258,6 +269,29 @@ pub fn parse(text: &str, vocab: &[TagName]) -> Request {
         r.understood.push(if from == to { format!("recorded on {from}") } else { format!("recorded {from} – {to}") });
         (r.from, r.to) = (Some(from), Some(to.clone()));
     }
+    // Photos before the length: "mỗi ảnh 4 giây" is not the video length.
+    if let Some((at, len)) = t.any(PHOTO_EACH) {
+        let end = t.clause_end(at);
+        let mut k = at + len;
+        while k < end && !t.plain[k].is_ascii_digit() {
+            k += 1;
+        }
+        if let Some((v, _)) = number(&t.plain, k) {
+            w.photo_ms = Some((v * 1000.0) as i64);
+            t.blank(at, end - at);
+        }
+    }
+    for (kind, needles) in PHOTOS {
+        let selfie = |t: &Text, at: usize, len: usize| t.plain[at + len..].iter().collect::<String>().trim_start().starts_with("tu suong");
+        if let Some((at, len)) = t.any(needles).filter(|&(at, len)| !selfie(&t, at, len)) {
+            w.photos = Some((*kind).into());
+            t.blank(at, len);
+            break;
+        }
+    }
+    if w.photo_ms.is_some() && w.photos.is_none() {
+        w.photos = Some("yes".into());
+    }
     w.target_ms = duration(&t);
 
     // Music before colours and concepts ("nhạc sôi động" is music, not the social style).
@@ -366,6 +400,14 @@ pub fn parse(text: &str, vocab: &[TagName]) -> Request {
     if let Some(c) = w.captions {
         u.push(format!("speech subtitles {}", if c { "on" } else { "off" }));
     }
+    match w.photos.as_deref() {
+        Some("none") => u.push("video only, no photos".into()),
+        Some(p) => u.push(format!("photos: {p}")),
+        None => {}
+    }
+    if let Some(ms) = w.photo_ms {
+        u.push(format!("each photo {} s", ms as f64 / 1000.0));
+    }
     if let Some(x) = &w.title {
         u.push(format!("title \"{x}\""));
     }
@@ -399,6 +441,17 @@ mod tests {
         let r = parse("tổng hợp chuyến đi, nhiều cảnh đường rừng, lên dốc, qua cầu", &v);
         assert_eq!(r.wishes.prefer, ["forest trail", "slope", "small bridge"], "{:?}", r.understood);
         assert_eq!(r.wishes.target_ms, None, "no length named: the recap picks one from the footage");
+    }
+
+    #[test]
+    fn photos_in_the_request() {
+        let r = parse("video 5 phút có cả ảnh, mỗi ảnh 3 giây, bỏ ảnh tự sướng", &vocab());
+        let w = &r.wishes;
+        assert_eq!((w.photos.as_deref(), w.photo_ms, w.target_ms), (Some("yes"), Some(3_000), Some(300_000)), "{:?}", r.understood);
+        assert_eq!(w.avoid, ["selfie"], "\"bỏ ảnh tự sướng\" is the selfie concept, not \"no photos\"");
+        assert_eq!(parse("chỉ video, không nhạc", &vocab()).wishes.photos.as_deref(), Some("none"));
+        assert_eq!(parse("tổng hợp chuyến đi, ít ảnh thôi", &vocab()).wishes.photos.as_deref(), Some("fewer"));
+        assert_eq!(parse("tổng hợp chuyến đi", &vocab()).wishes.photos, None);
     }
 
     #[test]

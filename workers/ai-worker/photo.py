@@ -296,9 +296,16 @@ def render(x, e, show_mask=False):
     return np.clip(x, 0, 1).astype(np.float32)
 
 
+def local_offset():
+    """This computer's UTC offset as "+07:00" (cameras write local time without a zone)."""
+    z = time.strftime("%z") or "+0000"
+    return f"{z[:3]}:{z[3:5]}"
+
+
 def taken(path):
-    """EXIF DateTimeOriginal of a JPEG as ISO "2026-02-20T10:15:00" (camera local time), else None. Minimal reader:
-    APP1 Exif -> IFD0 -> Exif IFD (0x8769) -> 0x9003; anything unexpected gives None."""
+    """EXIF DateTimeOriginal of a JPEG as ISO with its zone, "2026-02-20T10:15:00+07:00": OffsetTimeOriginal (0x9011)
+    when the camera wrote it, else this computer's offset (photos are usually sorted where they were taken). None
+    without EXIF. Minimal reader: APP1 Exif -> IFD0 -> Exif IFD (0x8769) -> 0x9003 / 0x9011."""
     import struct
     try:
         with open(path, "rb") as f:
@@ -317,13 +324,39 @@ def taken(path):
 
         ifd0 = struct.unpack(e + "I", t[4:8])[0]
         sub = next((v for tag, _, v in entries(ifd0) if tag == 0x8769), None)
-        val = next((v for tag, c, v in entries(sub) if tag == 0x9003 and c >= 19), None) if sub else None
-        if val is None:
+        exif = {tag: (c, v) for tag, c, v in entries(sub)} if sub else {}
+        if exif.get(0x9003, (0, 0))[0] < 19:
             return None
+        val = exif[0x9003][1]
         s = t[val:val + 19].decode("ascii")
-        return f"{s[0:4]}-{s[5:7]}-{s[8:10]}T{s[11:19]}" if s[4] == ":" and s[13] == ":" else None
+        if s[4] != ":" or s[13] != ":":
+            return None
+        zone = local_offset()
+        if 0x9011 in exif and exif[0x9011][0] >= 6:
+            o = t[exif[0x9011][1]:exif[0x9011][1] + 6].decode("ascii")
+            if o[0] in "+-" and o[3] == ":":
+                zone = o
+        return f"{s[0:4]}-{s[5:7]}-{s[8:10]}T{s[11:19]}{zone}"
     except Exception:
         return None
+
+
+ANALYZE_SIDE = 960  # same scale as the 540p video proxies, so sharpness compares with video scenes
+
+
+def analyze(path, edits, model_dir=None, devices=("GPU", "CPU")):
+    """Observations of a photo as edited (the Editing Core decides): technical metrics of analysis.frame_metrics
+    at 960 px, and OpenCLIP tags / cues (tagging.tag_image) when a model folder is given."""
+    import analysis
+
+    x, (w, h) = load(path, ANALYZE_SIDE)
+    y = cv2.cvtColor(_u8(render(x, edits or {})), cv2.COLOR_RGB2BGR)  # 8-bit BGR, as video frames
+    r = {"width": w, "height": h, "metrics": analysis.frame_metrics(cv2.cvtColor(y, cv2.COLOR_BGR2GRAY))}
+    if model_dir:
+        import tagging
+
+        r["tags"] = tagging.tag_image(y, model_dir, devices)
+    return r
 
 
 def render_file(path, edits, max_side, out, quality=92, show_mask=False, info=False):

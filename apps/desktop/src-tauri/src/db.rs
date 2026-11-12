@@ -117,6 +117,36 @@ const MIGRATIONS: &[&str] = &[
         edits_json    TEXT,
         imported_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     );",
+    // 11: mixed timeline — a clip is a video segment (media_id) or a still photo (photo_id, shown out_ms - in_ms);
+    // optional transition into the clip (overrides the project's transition for that join). Table rebuilt
+    // because SQLite cannot drop NOT NULL from media_id.
+    "CREATE TABLE project_clips_new (
+        id            INTEGER PRIMARY KEY,
+        project_id    INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        media_id      INTEGER REFERENCES media(id) ON DELETE CASCADE,
+        photo_id      INTEGER REFERENCES photos(id) ON DELETE CASCADE,
+        position      INTEGER NOT NULL,
+        in_ms         INTEGER NOT NULL CHECK (in_ms >= 0),
+        out_ms        INTEGER NOT NULL CHECK (out_ms > in_ms),
+        caption       TEXT,
+        transition    TEXT,
+        transition_ms INTEGER CHECK (transition_ms >= 0),
+        CHECK ((media_id IS NULL) <> (photo_id IS NULL))
+    );
+    INSERT INTO project_clips_new (id, project_id, media_id, position, in_ms, out_ms, caption)
+        SELECT id, project_id, media_id, position, in_ms, out_ms, caption FROM project_clips;
+    DROP TABLE project_clips;
+    ALTER TABLE project_clips_new RENAME TO project_clips;
+    CREATE INDEX project_clips_project ON project_clips (project_id, position);",
+    // 12: photo observations for the Editing Core (worker photo.analyze on the edited photo): frame metrics,
+    // OpenCLIP tags / cues in the media_tags shape (one sample), null when the model is not installed
+    "CREATE TABLE photo_analysis (
+        photo_id     INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+        metrics_json TEXT NOT NULL,
+        tags_json    TEXT,
+        model_id     TEXT,
+        created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );",
 ];
 
 pub fn err(e: rusqlite::Error) -> String {
@@ -249,6 +279,33 @@ mod tests {
         let mut c = open_in_memory();
         c.pragma_update(None, "user_version", MIGRATIONS.len() + 1).unwrap();
         assert!(migrate(&mut c).unwrap_err().contains("newer version"));
+    }
+
+    #[test]
+    fn mixed_timeline_migration_keeps_clips() {
+        let mut c = Connection::open_in_memory().unwrap();
+        c.pragma_update(None, "foreign_keys", "ON").unwrap();
+        for (i, sql) in MIGRATIONS.iter().take(10).enumerate() {
+            c.execute_batch(sql).unwrap();
+            c.pragma_update(None, "user_version", i + 1).unwrap();
+        }
+        c.execute_batch(
+            "INSERT INTO projects (id, name) VALUES (1, 'Trip');
+             INSERT INTO media (id, path, size, duration_ms, width, height, video_codec, probe_json) VALUES (1, 'E:\\v.mp4', 1, 9000, 1920, 1080, 'h264', '{}');
+             INSERT INTO project_clips (id, project_id, media_id, position, in_ms, out_ms, caption) VALUES (5, 1, 1, 0, 100, 900, 'Đà Lạt');",
+        )
+        .unwrap();
+        migrate(&mut c).unwrap();
+        let row: (i64, Option<i64>, String, Option<String>) = c
+            .query_row("SELECT id, media_id, caption, transition FROM project_clips", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap();
+        assert_eq!(row, (5, Some(1), "Đà Lạt".into(), None));
+        assert!(c.execute("INSERT INTO project_clips (project_id, position, in_ms, out_ms) VALUES (1, 1, 0, 1000)", []).is_err(), "media or photo required");
+        c.execute("INSERT INTO photos (id, path, size) VALUES (3, 'E:\\a.jpg', 1)", []).unwrap();
+        c.execute("INSERT INTO project_clips (project_id, photo_id, position, in_ms, out_ms) VALUES (1, 3, 1, 0, 4000)", []).unwrap();
+        c.execute("DELETE FROM photos WHERE id = 3", []).unwrap();
+        let n: i64 = c.query_row("SELECT COUNT(*) FROM project_clips", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "removing a photo from the library removes its clips");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 The Python AI worker process: how Rust starts it, protocol v1, its jobs, the analysis and tagging algorithms, and the dev-only OpenCLIP export.
 
-Last verified: 2026-11-11 against commit `9ac182c` + uncommitted changes. Index: [README.md](README.md). Kept current by the `sync-docs` skill ([.claude/skills/sync-docs](../../.claude/skills/sync-docs/SKILL.md)).
+Last verified: 2026-11-12 against commit `7eeb0bd` + uncommitted changes. Index: [README.md](README.md). Kept current by the `sync-docs` skill ([.claude/skills/sync-docs](../../.claude/skills/sync-docs/SKILL.md)).
 
 Sources: [memora_worker.py](../../workers/ai-worker/memora_worker.py), [analysis.py](../../workers/ai-worker/analysis.py),
 [tagging.py](../../workers/ai-worker/tagging.py), [requirements.lock.txt](../../workers/ai-worker/requirements.lock.txt),
@@ -95,6 +95,7 @@ Tested end-to-end by `worker::tests::worker_lifecycle_end_to_end` (skipped when 
 | `analyze_video` | `path` (proxy), `framesDir` (`cache\frames\<id>`), `quality` (`fast`/`balanced`/`detailed`, default `balanced`) | `analysis.analyze` output, §4 | `analysis::analyze_job` (job `media.analyze`, after `proxy::ensure_proxy`) |
 | `validate_openvino_ir` | `xml` (IR path), `devices` (default `["CPU"]`; Rust does not send it) | `{validation: "openvino-ir", openvino, inputs: [{name, shape}], devices: [{device, compileMs, inferMs, outputs, ok, error?}]}`; raises if no device is `ok`. Dynamic dims → 1, or 224 for H/W of rank-4 inputs; input = zeros; `ok` = all outputs finite | `models::install_job` (job `models.install`, manifests with `validation: "openvino-ir"`); result stored in `models.details` |
 | `tag_video` | `path` (proxy), `modelDir`, `everyMs` (default 2000; Rust sends `tagging::EVERY_MS` = 2000), `devices` (default `["GPU","CPU"]`; Rust does not send it) | `tagging.tag_video` output, §5 | `tagging::tag_job` (job `media.tag`, after `proxy::ensure_proxy`) |
+| `photo_analyze` | `path`, `edits`, `modelDir` (null = metrics only), `devices` (default `["GPU","CPU"]`) | `{width, height, metrics: frame_metrics, tags?: tag_video shape with one sample}` | `photos::analyze_job` (job `media.photo_analyze`) |
 | `photo_render` | `path`, `edits`, `maxSide` (0 = full size), `out`, `quality` (default 92), `showMask`, `info` | `{width, height, outWidth, outHeight, ms, taken?}` | `photos::Lane` (import thumbnails, previews, export) — the photo worker process, not the job queue |
 | `photo_auto` | `path` | `{edits, skyShare}` | `lib::auto_photo` via `photos::Lane` |
 | `diagnostic.steps` | `steps` (default 10) | `{steps}`; 50 ms per step with progress + cancel | Tests only |
@@ -178,6 +179,8 @@ Rust (`tagging::store`) keeps `device`, `tags`, `cues`, `samples` (see [DATABASE
 
 Self-check: `python tagging.py` — preprocess output shape/dtype for 540×960, 960×540 and 100×100 inputs, the normalised value of a white pixel, and `cue_score` on unit vectors. Does not load a model.
 
+**tagging.py** (2026-11-12): `Tagger(model_dir, devices)` holds the compiled encoder and embeddings; `sample(bgr, at_ms)` → one sample; `result(samples, every_ms, seconds)` → the shared result shape; `tag_video` and `tag_image(bgr, model_dir)` (photos, one sample at 0 ms) use it.
+
 ## 5a. photo.py — photo editor (ADR 0006, slice B1)
 
 Classical, deterministic, no model; the original is only read (`np.fromfile` + `cv2.imdecode`, EXIF orientation applied; Unicode paths work). Edit values −100..100, unknown keys ignored, radii scaled from a 1600 px reference so previews match full-size exports. Last two decodes cached for live previews.
@@ -186,7 +189,7 @@ Order of operations (`render`): geometry (rotate 90° steps, straighten with zoo
 
 **Sky** (owner 2026-11-12: enhance the photo's own sky, cinematic but natural, never paste one): `sky_mask` at 512 px — sky-like = bright, not foliage (green hues), and smooth or blue or cloud-white; kept only as an unbroken run from the top of each column starting in the top 10 %; narrow downward spikes (trunks, white shirts) cut to the running median skyline; guided-filter soft edge limited to the dilated hard mask. `enhance_sky`: cloud texture (bounded local contrast), slightly deeper bright sky, chroma × 1.35, optional warmth — blended by the mask × strength. Thresholds are initial values checked on stills from the owner's footage (frame boards); a click selection comes with slice B2.
 
-`auto(path)`: exposure towards a mid-grey median (70 %, ±60), white balance from near-neutral pixels only at half strength, contrast for flat photos, highlights −25 / shadows +20 when clipped, clarity 10, vibrance 15, sharpen 20, sky 35 when the sky covers > 8 %. `taken(path)`: minimal EXIF reader (DateTimeOriginal). Self-check `python photo.py` (neutral stack, exposure, white balance, sky mask on a synthetic scene, edge-only sharpening, geometry, looks, extremes, Unicode file names, auto, no-EXIF date).
+`auto(path)`: exposure towards a mid-grey median (70 %, ±60), white balance from near-neutral pixels only at half strength, contrast for flat photos, highlights −25 / shadows +20 when clipped, clarity 10, vibrance 15, sharpen 20, sky 35 when the sky covers > 8 %. `taken(path)`: minimal EXIF reader (DateTimeOriginal + OffsetTimeOriginal, else `local_offset()` of this PC → `…+07:00`). `analyze(path, edits, model_dir)`: the edited photo at `ANALYZE_SIDE = 960` px (8-bit BGR, the video-proxy scale) → `analysis.frame_metrics`, plus `tagging.tag_image` when a model folder is given (measured on this PC: ≈ 0.14 s per photo on the GPU after a 1.4 s first compile). Self-check `python photo.py` (neutral stack, exposure, white balance, sky mask on a synthetic scene, edge-only sharpening, geometry, looks, extremes, Unicode file names, auto, no-EXIF date).
 
 ## 6. tools/clip-export (dev-only)
 
@@ -215,7 +218,7 @@ Order of operations (`render`): geometry (rotate 90° steps, straighten with zoo
 |---|---|---|
 | numpy | 2.5.4 | Arrays (all jobs) |
 | opencv-python-headless | 5.0.0.93 | Decode, resize, Laplacian, phase correlation, JPEG (analysis, tagging) |
-| openvino | 2026.4.1 | Inference runtime (`validate_devices`, `validate_openvino_ir`, `tag_video`, `hello`) |
+| openvino | 2026.4.1 | Inference runtime (`validate_devices`, `validate_openvino_ir`, `tag_video`, `photo_analyze`, `hello`) |
 | openvino-telemetry | 2025.2.0 | Dependency of openvino |
 | scenedetect | 0.7.2 | `AdaptiveDetector` (analysis) |
 | click | 8.5.1 | Dependency of scenedetect |

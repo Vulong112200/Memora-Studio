@@ -268,6 +268,12 @@ export default function App() {
     remember("memora.page", p);
     if (s) setStep(s);
   };
+  // "Edit photo" on a timeline clip: open it on the Photos page.
+  useEffect(() => {
+    const open = (e: Event) => { remember("memora.photo", String((e as CustomEvent<number>).detail)); setPage("photos"); remember("memora.page", "photos"); };
+    window.addEventListener("memora:open-photo", open);
+    return () => window.removeEventListener("memora:open-photo", open);
+  }, []);
   const open = useCallback((p: Project | null) => {
     setProject(p);
     remember("memora.project", p ? String(p.id) : null);

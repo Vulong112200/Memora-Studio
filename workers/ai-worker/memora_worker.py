@@ -210,6 +210,14 @@ def photo_render(job):
                              bool(p.get("showMask")), bool(p.get("info")))
 
 
+def photo_analyze(job):
+    """Photo observations for the Editing Core. params: path, edits, modelDir (null = metrics only), devices."""
+    import photo
+
+    p = job.params
+    return photo.analyze(p["path"], p.get("edits") or {}, p.get("modelDir"), p.get("devices", ["GPU", "CPU"]))
+
+
 def photo_auto(job):
     """Photo editor: suggested starting values for one photo. params: path."""
     import photo
@@ -245,6 +253,7 @@ JOBS = {
     "tag_video": tag_video,
     "photo_render": photo_render,
     "photo_auto": photo_auto,
+    "photo_analyze": photo_analyze,
     "diagnostic.steps": diagnostic_steps,
     "diagnostic.crash": diagnostic_crash,
     "diagnostic.block": diagnostic_block,
