@@ -2,7 +2,7 @@
 
 SQLite schema, migrations, backups, and which Rust code reads and writes each table and JSON column.
 
-Last verified: 2026-11-12 against commit `7eeb0bd` + uncommitted changes. Index: [README.md](README.md). Kept current by the `sync-docs` skill ([.claude/skills/sync-docs](../../.claude/skills/sync-docs/SKILL.md)).
+Last verified: 2026-11-12 against commit `12706f3` + uncommitted changes. Index: [README.md](README.md). Kept current by the `sync-docs` skill ([.claude/skills/sync-docs](../../.claude/skills/sync-docs/SKILL.md)).
 
 Sources: [db.rs](../../apps/desktop/src-tauri/src/db.rs), plus every module that runs SQL:
 [projects.rs](../../apps/desktop/src-tauri/src/projects.rs), [media.rs](../../apps/desktop/src-tauri/src/media.rs),
@@ -325,7 +325,7 @@ Rebuilt by migration 11 (temporary name `project_clips_new`). Table CHECK: `(med
 | modified_unix | INTEGER | | File modified time at import |
 | width, height | INTEGER | | Displayed size (EXIF orientation applied), set after the thumbnail render |
 | taken_at | TEXT | | EXIF DateTimeOriginal with its zone `YYYY-MM-DDTHH:MM:SS+07:00` (OffsetTimeOriginal, else this PC's offset; since 2026-11-12, older imports have no zone = read as UTC), else file time `…Z` |
-| edits_json | TEXT | | Edit stack (object) or NULL; keys of `photo.py` (`exposure`, `contrast`, `highlights`, `shadows`, `whites`, `blacks`, `temperature`, `tint`, `vibrance`, `saturation`, `clarity`, `dehaze`, `sharpen`, `denoise`, `sky`, `skyWarmth`, `vignette`, `straighten` = numbers −100..100 (straighten ±15°), `rotate` 0/90/180/270, `crop` `free|1:1|4:5|3:2|16:9|9:16`, `look` = one of `photo.LOOKS`, `hsl` = `{band: [hue, sat, light]}`) |
+| edits_json | TEXT | | Edit stack (object) or NULL; keys of `photo.py` (`exposure`, `contrast`, `highlights`, `shadows`, `whites`, `blacks`, `temperature`, `tint`, `vibrance`, `saturation`, `clarity`, `dehaze`, `sharpen`, `denoise`, `sky`, `skyWarmth`, `vignette`, `straighten` = numbers −100..100 (straighten ±15°), `rotate` 0/90/180/270, `crop` `free|1:1|4:5|3:2|16:9|9:16`, `look` = one of `photo.LOOKS`, `hsl` = `{band: [hue, sat, light]}`; AI keys (2026-11-12) `blemish`, `smooth`, `faceLight`, `bokeh` 0..100, `erase` = `[{points: [[x, y]…] 0..1, r}]` painted strokes, `remove` = `[{points, labels?}]` clicked objects). An empty object is stored as NULL |
 | imported_at | TEXT | NOT NULL, default now | |
 
 - **W**: `photos::upsert` / `set_info` (← `photos::import`, `lib::import_photos`), `photos::set_edits` (`lib::set_photo_edits`), `photos::remove` (`lib::remove_photo`).

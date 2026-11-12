@@ -1116,7 +1116,7 @@ mod tests {
         PhotoSource {
             photo: crate::photos::Photo {
                 id, path: format!(r"E:\p{id}.jpg"), size: 1, width: Some(4000), height: Some(3000), taken_at: Some(taken.into()),
-                edits: serde_json::Value::Null, imported_at: "2026-11-01T00:00:00Z".into(), thumb: None, analyzed: analysed,
+                edits: serde_json::Value::Null, imported_at: "2026-11-01T00:00:00Z".into(), thumb: None, analyzed: analysed, missing: false,
             },
             analysis: analysed.then(|| crate::photos::Analysis {
                 metrics: Sample { at_ms: 0, sharpness, brightness: 0.45, contrast: 0.2, clip_low: 0.0, clip_high: 0.0, black: false, dhash: dhash.into() },

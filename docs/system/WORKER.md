@@ -2,7 +2,7 @@
 
 The Python AI worker process: how Rust starts it, protocol v1, its jobs, the analysis and tagging algorithms, and the dev-only OpenCLIP export.
 
-Last verified: 2026-11-12 against commit `7eeb0bd` + uncommitted changes. Index: [README.md](README.md). Kept current by the `sync-docs` skill ([.claude/skills/sync-docs](../../.claude/skills/sync-docs/SKILL.md)).
+Last verified: 2026-11-12 against commit `12706f3` + uncommitted changes. Index: [README.md](README.md). Kept current by the `sync-docs` skill ([.claude/skills/sync-docs](../../.claude/skills/sync-docs/SKILL.md)).
 
 Sources: [memora_worker.py](../../workers/ai-worker/memora_worker.py), [analysis.py](../../workers/ai-worker/analysis.py),
 [tagging.py](../../workers/ai-worker/tagging.py), [requirements.lock.txt](../../workers/ai-worker/requirements.lock.txt),
@@ -181,6 +181,29 @@ Self-check: `python tagging.py` — preprocess output shape/dtype for 540×960, 
 
 **tagging.py** (2026-11-12): `Tagger(model_dir, devices)` holds the compiled encoder and embeddings; `sample(bgr, at_ms)` → one sample; `result(samples, every_ms, seconds)` → the shared result shape; `tag_video` and `tag_image(bgr, model_dir)` (photos, one sample at 0 ms) use it.
 
+## 5b. photo_ai.py — local AI photo tools (ADR 0006 B2–B4, 2026-11-12)
+
+`MODELS` (paths per job from `photos::with_models`; a missing key turns that tool off and its edits do nothing):
+`face` YuNet ONNX (OpenCV `FaceDetectorYN`, the 4 rotations so lying-down selfies are found), `landmarks` MediaPipe
+`.task` (the face-mesh TFLite is unzipped to `%TEMP%` and run on the OpenVINO CPU, 256×256 eye-aligned crop → 478
+points), `sam` EfficientSAM-Ti encoder + decoder (OpenVINO CPU, long side 1024, embeddings memoised per image),
+`inpaint` MI-GAN pipeline v2 (OpenCV DNN CPU: OpenVINO's CPU plug-in rejects it and its GPU output is wrong), `depth`
+Depth Anything V2 Small and `matte` MODNet (OpenVINO GPU → CPU, ImageNet / 0.5 normalisation from the publishers'
+preprocessor configs). OpenVINO compiled blobs are cached in `%TEMP%\memora-openvino-cache`.
+
+- `retouch(x, blemish, smooth, light)`: per face, skin mask = mesh face oval minus eyes / brows / lips (YuNet ellipse
+  fallback), gated by the cheek skin colour; spots darker or redder than their median surroundings, sized 1.2–14 % of the
+  eye distance and not elongated → Telea inpaint; smoothing = guided-filter base + 25 % detail + fine texture kept;
+  gentle warm lift. Identity unchanged (nothing generated).
+- `remove(x, objects, painted)`: clicks → EfficientSAM masks (best IoU of 3) grown 1.2 % → union with painted strokes
+  → MI-GAN fill, feathered; memoised per image + mask. `photo.erase` (classical) remains the fallback for strokes.
+- `bokeh(x, strength)`: nearness from depth (2–98 % stretch); subject = MODNet matte when the photo has faces, else the
+  nearest depth; lens (disc) blur in 3 levels growing with distance, on a reduced copy, normalised so subject colours do
+  not bleed; radius 2.5 % of the long side at full strength.
+- Measured on this PC (owner photos, 1600 px, single runs, warm): retouch ≈ 0.4 s, click-remove 0.1–0.2 s (cached
+  mask), background blur ≈ 0.5 s, full-size (2560 px) removal 1.6 s; first use 10–15 s (model compile).
+- Self-check `python photo_ai.py` (no models: every tool is a no-op).
+
 ## 5a. photo.py — photo editor (ADR 0006, slice B1)
 
 Classical, deterministic, no model; the original is only read (`np.fromfile` + `cv2.imdecode`, EXIF orientation applied; Unicode paths work). Edit values −100..100, unknown keys ignored, radii scaled from a 1600 px reference so previews match full-size exports. Last two decodes cached for live previews.
@@ -189,7 +212,7 @@ Order of operations (`render`): geometry (rotate 90° steps, straighten with zoo
 
 **Sky** (owner 2026-11-12: enhance the photo's own sky, cinematic but natural, never paste one): `sky_mask` at 512 px — sky-like = bright, not foliage (green hues), and smooth or blue or cloud-white; kept only as an unbroken run from the top of each column starting in the top 10 %; narrow downward spikes (trunks, white shirts) cut to the running median skyline; guided-filter soft edge limited to the dilated hard mask. `enhance_sky`: cloud texture (bounded local contrast), slightly deeper bright sky, chroma × 1.35, optional warmth — blended by the mask × strength. Thresholds are initial values checked on stills from the owner's footage (frame boards); a click selection comes with slice B2.
 
-`auto(path)`: exposure towards a mid-grey median (70 %, ±60), white balance from near-neutral pixels only at half strength, contrast for flat photos, highlights −25 / shadows +20 when clipped, clarity 10, vibrance 15, sharpen 20, sky 35 when the sky covers > 8 %. `taken(path)`: minimal EXIF reader (DateTimeOriginal + OffsetTimeOriginal, else `local_offset()` of this PC → `…+07:00`). `analyze(path, edits, model_dir)`: the edited photo at `ANALYZE_SIDE = 960` px (8-bit BGR, the video-proxy scale) → `analysis.frame_metrics`, plus `tagging.tag_image` when a model folder is given (measured on this PC: ≈ 0.14 s per photo on the GPU after a 1.4 s first compile). Self-check `python photo.py` (neutral stack, exposure, white balance, sky mask on a synthetic scene, edge-only sharpening, geometry, looks, extremes, Unicode file names, auto, no-EXIF date).
+`auto(path)`: exposure towards a mid-grey median (70 %, ±60), white balance from near-neutral pixels only at half strength, contrast for flat photos, highlights −25 / shadows +20 when clipped, clarity 10, vibrance 15, sharpen 20, sky 35 when the sky covers > 8 %. `taken(path)`: minimal EXIF reader (DateTimeOriginal + OffsetTimeOriginal, else `local_offset()` of this PC → `…+07:00`). Since 2026-11-12 `render` also applies `erase` (painted strokes) / `remove` (clicks) right after geometry, the face keys `blemish` / `smooth` / `faceLight`, and `bokeh` after the look (all via photo_ai.py); `auto` adds blemish 60 / smooth 35 / faceLight 15 when it finds faces. `analyze(path, edits, model_dir)`: the edited photo at `ANALYZE_SIDE = 960` px (8-bit BGR, the video-proxy scale) → `analysis.frame_metrics`, plus `tagging.tag_image` when a model folder is given (measured on this PC: ≈ 0.14 s per photo on the GPU after a 1.4 s first compile). Self-check `python photo.py` (neutral stack, exposure, white balance, sky mask on a synthetic scene, edge-only sharpening, geometry, looks, extremes, Unicode file names, auto, no-EXIF date).
 
 ## 6. tools/clip-export (dev-only)
 

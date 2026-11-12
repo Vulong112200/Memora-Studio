@@ -205,6 +205,8 @@ def photo_render(job):
     showMask, info (also return the EXIF date)."""
     import photo
 
+    photo.photo_ai.MODELS = job.params.get("models") or {}  # installed photo AI models (photos::with_models)
+
     p = job.params
     return photo.render_file(p["path"], p.get("edits") or {}, int(p.get("maxSide", 0)), p["out"], int(p.get("quality", 92)),
                              bool(p.get("showMask")), bool(p.get("info")))
@@ -214,6 +216,8 @@ def photo_analyze(job):
     """Photo observations for the Editing Core. params: path, edits, modelDir (null = metrics only), devices."""
     import photo
 
+    photo.photo_ai.MODELS = job.params.get("models") or {}  # installed photo AI models (photos::with_models)
+
     p = job.params
     return photo.analyze(p["path"], p.get("edits") or {}, p.get("modelDir"), p.get("devices", ["GPU", "CPU"]))
 
@@ -221,6 +225,8 @@ def photo_analyze(job):
 def photo_auto(job):
     """Photo editor: suggested starting values for one photo. params: path."""
     import photo
+
+    photo.photo_ai.MODELS = job.params.get("models") or {}  # installed photo AI models (photos::with_models)
 
     return photo.auto(job.params["path"])
 

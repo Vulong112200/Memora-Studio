@@ -459,13 +459,24 @@ fn move_clip(id: i64, delta: i64, state: State<'_, AppState>) -> Result<(), Stri
     timeline::move_clip(guard.as_mut().map_err(|e| e.clone())?, id, delta)
 }
 
+/// Library photos with thumbnails (missing ones re-created) and a `missing` flag for moved files.
 #[tauri::command]
-fn list_photos(state: State<'_, AppState>) -> Result<Vec<photos::Photo>, String> {
-    let mut items = with_db(&state, photos::list)?;
-    if let Some(cache) = cache_dir(&state) {
+async fn list_photos(state: State<'_, AppState>) -> Result<Vec<photos::Photo>, String> {
+    let (db, lane, root) = photo_ctx(&state)?;
+    blocking(move || {
+        let mut items = { let g = db.lock().unwrap(); photos::list(g.as_ref().map_err(Clone::clone)?)? };
+        let cache = root.join("cache");
         photos::attach_thumbs(&cache, &mut items);
-    }
-    Ok(items)
+        photos::repair_thumbs(&lane, &cache, &mut items);
+        Ok(items)
+    })
+    .await
+}
+
+/// Photos moved to `folder` (same name and size) are found again; returns how many.
+#[tauri::command]
+fn relink_photos(folder: String, state: State<'_, AppState>) -> Result<usize, String> {
+    with_db(&state, |c| photos::relink(c, Path::new(&folder)))
 }
 
 /// What a photo command running off the UI thread needs: database, photo worker, data root.
@@ -485,11 +496,36 @@ fn photo_of(db: &Db, id: i64) -> Result<photos::Photo, String> {
 
 /// Adds photos (read in place, never modified): row, size, date, thumbnail.
 #[tauri::command]
-async fn import_photos(paths: Vec<String>, state: State<'_, AppState>) -> Result<photos::ImportResult, String> {
+async fn import_photos(paths: Vec<String>, auto: Option<bool>, state: State<'_, AppState>) -> Result<photos::ImportResult, String> {
     let (db, lane, root) = photo_ctx(&state)?;
-    let r = blocking(move || photos::import(&db, &lane, &root.join("cache"), &paths)).await?;
+    let r = blocking(move || {
+        let r = photos::import(&db, &lane, &root.join("cache"), &paths)?;
+        if auto.unwrap_or(false) {
+            photos::auto_unedited(&db, &lane, &r.ids)?;
+        }
+        Ok(r)
+    })
+    .await?;
     tracing::info!(imported = r.ids.len(), failed = r.failed.len(), "photos imported");
     Ok(r)
+}
+
+/// Suggested edits for the given photos that have none yet (batch "Auto"); returns how many were edited.
+#[tauri::command]
+async fn auto_photos(ids: Vec<i64>, state: State<'_, AppState>) -> Result<usize, String> {
+    let (db, lane, _) = photo_ctx(&state)?;
+    blocking(move || photos::auto_unedited(&db, &lane, &ids)).await
+}
+
+/// Which photo AI tools are installed: `face` (retouch), `mesh` (precise skin mask), `select` + `inpaint` (click to
+/// remove), `inpaint` (AI fill of painted areas), `bokeh` (background blur; `matte` sharpens people).
+#[tauri::command]
+fn photo_tools(state: State<'_, AppState>) -> Value {
+    let root = state.settings.lock().unwrap().data_root.clone();
+    let m = root.as_deref().map(photos::photo_models).unwrap_or_default();
+    let has = |k: &str| m.get(k).is_some();
+    serde_json::json!({"face": has("face"), "mesh": has("landmarks"), "select": has("sam") && has("inpaint"), "inpaint": has("inpaint"),
+        "bokeh": has("depth"), "matte": has("matte")})
 }
 
 #[tauri::command]
@@ -659,6 +695,9 @@ pub fn run() {
             list_clips,
             add_clip,
             add_photo_clips,
+            auto_photos,
+            relink_photos,
+            photo_tools,
             set_clip_range,
             set_clip_transition,
             list_joins,

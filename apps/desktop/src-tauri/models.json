@@ -1,137 +1,335 @@
 [
-  {
-    "id": "openclip-vit-b32",
-    "name": "OpenCLIP ViT-B/32",
-    "version": "4",
-    "category": "vision",
-    "description": "Visual concepts and text search over scene frames (beach, food, city, people …).",
-    "required": false,
-    "license": "MIT (open_clip; LAION model card: English-only, research-oriented, fixed tag taxonomy used)",
-    "minimumRamGb": 8,
-    "validation": "openvino-ir",
-    "artifacts": [
-      {
-        "file": "openclip_image.xml",
-        "url": null,
-        "revision": "laion/CLIP-ViT-B-32-laion2B-s34B-b79K@1a25a446712ba5ee05982a381eed697ef9b435cf, exported by tools/clip-export/export_openclip.py",
-        "sha256": "888fb43dcf3528894bbc9d900dcbed3b5cb9ede681dcc045a827bb24b3013756",
-        "sizeBytes": 491391
-      },
-      {
-        "file": "openclip_image.bin",
-        "url": null,
-        "revision": "laion/CLIP-ViT-B-32-laion2B-s34B-b79K@1a25a446712ba5ee05982a381eed697ef9b435cf, exported by tools/clip-export/export_openclip.py",
-        "sha256": "dd30af3f8e7da647b5a607d75feead24700d0cc3671d417de1719f73edf23ff5",
-        "sizeBytes": 175698576
-      },
-      {
-        "file": "openclip_tags.json",
-        "url": null,
-        "revision": "laion/CLIP-ViT-B-32-laion2B-s34B-b79K@1a25a446712ba5ee05982a381eed697ef9b435cf, exported by tools/clip-export/export_openclip.py",
-        "sha256": "039b1648ab9d82da3f09a6f749e4405ebdd3e7168c278288d0f2da55cf15eb4f",
-        "sizeBytes": 322909
-      }
+ {
+  "id": "openclip-vit-b32",
+  "name": "OpenCLIP ViT-B/32",
+  "version": "4",
+  "category": "vision",
+  "description": "Visual concepts and text search over scene frames (beach, food, city, people …).",
+  "required": false,
+  "license": "MIT (open_clip; LAION model card: English-only, research-oriented, fixed tag taxonomy used)",
+  "minimumRamGb": 8,
+  "validation": "openvino-ir",
+  "artifacts": [
+   {
+    "file": "openclip_image.xml",
+    "url": null,
+    "revision": "laion/CLIP-ViT-B-32-laion2B-s34B-b79K@1a25a446712ba5ee05982a381eed697ef9b435cf, exported by tools/clip-export/export_openclip.py",
+    "sha256": "888fb43dcf3528894bbc9d900dcbed3b5cb9ede681dcc045a827bb24b3013756",
+    "sizeBytes": 491391
+   },
+   {
+    "file": "openclip_image.bin",
+    "url": null,
+    "revision": "laion/CLIP-ViT-B-32-laion2B-s34B-b79K@1a25a446712ba5ee05982a381eed697ef9b435cf, exported by tools/clip-export/export_openclip.py",
+    "sha256": "dd30af3f8e7da647b5a607d75feead24700d0cc3671d417de1719f73edf23ff5",
+    "sizeBytes": 175698576
+   },
+   {
+    "file": "openclip_tags.json",
+    "url": null,
+    "revision": "laion/CLIP-ViT-B-32-laion2B-s34B-b79K@1a25a446712ba5ee05982a381eed697ef9b435cf, exported by tools/clip-export/export_openclip.py",
+    "sha256": "039b1648ab9d82da3f09a6f749e4405ebdd3e7168c278288d0f2da55cf15eb4f",
+    "sizeBytes": 322909
+   }
+  ],
+  "runtimes": [
+   {
+    "runtime": "openvino",
+    "devices": [
+     "CPU",
+     "GPU"
     ],
-    "runtimes": [
-      {
-        "runtime": "openvino",
-        "devices": [
-          "CPU",
-          "GPU"
-        ],
-        "validated": false
-      }
+    "validated": false
+   }
+  ],
+  "notes": "Image encoder as OpenVINO IR (FP16 weights, unchanged since v1) + precomputed text embeddings for a fixed bilingual tag list, 4 bad-shot detectors (finger over the lens, blurry, ground, too dark) and, since v3, the camera cue \"view ahead\" (two-way softmax against \"looking down at handlebars and the ground\"). Exported locally: install with \"Install from files\" from E:\\Memora Data\\downloads\\openclip-export-v3. IR vs PyTorch CPU: min cosine 0.9999980."
+ },
+ {
+  "id": "whisper-base",
+  "name": "Whisper base (multilingual)",
+  "version": "1",
+  "category": "speech",
+  "description": "Speech transcription for Vietnamese and English (default speech model).",
+  "required": false,
+  "license": "MIT (OpenAI Whisper weights; ggml conversion by ggerganov/whisper.cpp)",
+  "minimumRamGb": 4,
+  "validation": "none",
+  "artifacts": [
+   {
+    "file": "ggml-base.bin",
+    "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin",
+    "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+    "sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+    "sizeBytes": 147951465
+   }
+  ],
+  "runtimes": [
+   {
+    "runtime": "whisper.cpp",
+    "devices": [
+     "CPU"
     ],
-    "notes": "Image encoder as OpenVINO IR (FP16 weights, unchanged since v1) + precomputed text embeddings for a fixed bilingual tag list, 4 bad-shot detectors (finger over the lens, blurry, ground, too dark) and, since v3, the camera cue \"view ahead\" (two-way softmax against \"looking down at handlebars and the ground\"). Exported locally: install with \"Install from files\" from E:\\Memora Data\\downloads\\openclip-export-v3. IR vs PyTorch CPU: min cosine 0.9999980."
-  },
-  {
-    "id": "whisper-base",
-    "name": "Whisper base (multilingual)",
-    "version": "1",
-    "category": "speech",
-    "description": "Speech transcription for Vietnamese and English (default speech model).",
-    "required": false,
-    "license": "MIT (OpenAI Whisper weights; ggml conversion by ggerganov/whisper.cpp)",
-    "minimumRamGb": 4,
-    "validation": "none",
-    "artifacts": [
-      {
-        "file": "ggml-base.bin",
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin",
-        "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
-        "sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
-        "sizeBytes": 147951465
-      }
+    "validated": false
+   }
+  ],
+  "notes": "Runs in whisper.cpp as a separate native process (ADR 0001). Load validation is added together with the whisper.cpp runtime."
+ },
+ {
+  "id": "whisper-small",
+  "name": "Whisper small (multilingual)",
+  "version": "1",
+  "category": "speech",
+  "description": "Better transcription quality; optional, larger and slower than base.",
+  "required": false,
+  "license": "MIT (OpenAI Whisper weights; ggml conversion by ggerganov/whisper.cpp)",
+  "minimumRamGb": 8,
+  "validation": "none",
+  "artifacts": [
+   {
+    "file": "ggml-small.bin",
+    "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin",
+    "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+    "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+    "sizeBytes": 487601967
+   }
+  ],
+  "runtimes": [
+   {
+    "runtime": "whisper.cpp",
+    "devices": [
+     "CPU"
     ],
-    "runtimes": [
-      {
-        "runtime": "whisper.cpp",
-        "devices": [
-          "CPU"
-        ],
-        "validated": false
-      }
+    "validated": false
+   }
+  ],
+  "notes": "Download on demand only (docs/Production.md §3.3)."
+ },
+ {
+  "id": "silero-vad",
+  "name": "Silero VAD (speech detection)",
+  "version": "1",
+  "category": "speech",
+  "description": "Skips wind, engine and other non-speech audio before transcription; prevents invented text.",
+  "required": false,
+  "license": "MIT (Silero VAD; ggml conversion by ggml-org/whisper-vad)",
+  "minimumRamGb": 1,
+  "validation": "none",
+  "artifacts": [
+   {
+    "file": "ggml-silero-v6.2.0.bin",
+    "url": "https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v6.2.0.bin",
+    "revision": "9ffd54a1e1ee413ddf265af9913beaf518d1639b",
+    "sha256": "2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987",
+    "sizeBytes": 885098
+   }
+  ],
+  "runtimes": [
+   {
+    "runtime": "whisper.cpp",
+    "devices": [
+     "CPU"
     ],
-    "notes": "Runs in whisper.cpp as a separate native process (ADR 0001). Load validation is added together with the whisper.cpp runtime."
-  },
-  {
-    "id": "whisper-small",
-    "name": "Whisper small (multilingual)",
-    "version": "1",
-    "category": "speech",
-    "description": "Better transcription quality; optional, larger and slower than base.",
-    "required": false,
-    "license": "MIT (OpenAI Whisper weights; ggml conversion by ggerganov/whisper.cpp)",
-    "minimumRamGb": 8,
-    "validation": "none",
-    "artifacts": [
-      {
-        "file": "ggml-small.bin",
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin",
-        "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
-        "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
-        "sizeBytes": 487601967
-      }
+    "validated": true
+   }
+  ],
+  "notes": "Used automatically by transcription when installed (whisper.cpp --vad). Measured on owner footage: removes noise hallucination loops, small model 53 s -> 33 s for 5 min."
+ },
+ {
+  "id": "face-yunet",
+  "name": "YuNet face detector 2023mar",
+  "version": "1",
+  "category": "vision",
+  "description": "Finds faces (also in selfies taken lying down) for the photo face tools: spots, smooth and brighten skin.",
+  "required": false,
+  "license": "MIT (OpenCV Zoo, Copyright (c) 2020 Shiqi Yu)",
+  "minimumRamGb": 4,
+  "validation": "none",
+  "artifacts": [
+   {
+    "file": "face_detection_yunet_2023mar.onnx",
+    "url": "https://huggingface.co/opencv/face_detection_yunet/resolve/3cc26e7f1014a5ee5d74a42acee58bafc9d0a310/face_detection_yunet_2023mar.onnx",
+    "revision": "opencv/face_detection_yunet@3cc26e7f1014a5ee5d74a42acee58bafc9d0a310",
+    "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+    "sizeBytes": 232589
+   }
+  ],
+  "runtimes": [
+   {
+    "runtime": "opencv-dnn",
+    "devices": [
+     "CPU"
     ],
-    "runtimes": [
-      {
-        "runtime": "whisper.cpp",
-        "devices": [
-          "CPU"
-        ],
-        "validated": false
-      }
+    "validated": true
+   }
+  ],
+  "notes": "Runs in OpenCV FaceDetectorYN (photo_ai.faces). Loaded and run on this PC in the 2026-11-12 spike (docs/PHOTO_MODEL_PROPOSAL.md)."
+ },
+ {
+  "id": "face-landmarker",
+  "name": "MediaPipe Face Landmarker (Face Mesh V2)",
+  "version": "1",
+  "category": "vision",
+  "description": "478 face points, so skin retouch leaves eyes, brows and lips untouched.",
+  "required": false,
+  "license": "Apache-2.0 (MediaPipe; Face Mesh V2 model card)",
+  "minimumRamGb": 4,
+  "validation": "none",
+  "artifacts": [
+   {
+    "file": "face_landmarker.task",
+    "url": "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+    "revision": "float16/1 (Last-Modified 2023-05-03, MD5 b0e7274907a1644404fef66b28dd6d85)",
+    "sha256": "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff",
+    "sizeBytes": 3758596
+   }
+  ],
+  "runtimes": [
+   {
+    "runtime": "openvino",
+    "devices": [
+     "CPU"
     ],
-    "notes": "Download on demand only (docs/Production.md §3.3)."
-  },
-  {
-    "id": "silero-vad",
-    "name": "Silero VAD (speech detection)",
-    "version": "1",
-    "category": "speech",
-    "description": "Skips wind, engine and other non-speech audio before transcription; prevents invented text.",
-    "required": false,
-    "license": "MIT (Silero VAD; ggml conversion by ggml-org/whisper-vad)",
-    "minimumRamGb": 1,
-    "validation": "none",
-    "artifacts": [
-      {
-        "file": "ggml-silero-v6.2.0.bin",
-        "url": "https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v6.2.0.bin",
-        "revision": "9ffd54a1e1ee413ddf265af9913beaf518d1639b",
-        "sha256": "2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987",
-        "sizeBytes": 885098
-      }
+    "validated": true
+   }
+  ],
+  "notes": "SHA-256 not published by Google: computed after the approved download, MD5 matched the published ETag. The face mesh TFLite inside the bundle runs on the OpenVINO CPU (TFLite frontend). Loaded and run on this PC in the 2026-11-12 spike (docs/PHOTO_MODEL_PROPOSAL.md)."
+ },
+ {
+  "id": "efficientsam-ti",
+  "name": "EfficientSAM-Ti (click to select)",
+  "version": "1",
+  "category": "vision",
+  "description": "Selects the object you click on, for removing it.",
+  "required": false,
+  "license": "Apache-2.0 (yformer/EfficientSAM; ONNX export by K. Wada in the authors' Space)",
+  "minimumRamGb": 8,
+  "validation": "none",
+  "artifacts": [
+   {
+    "file": "efficientsam_ti_encoder.onnx",
+    "url": "https://huggingface.co/spaces/yunyangx/EfficientSAM/resolve/d8dbb1eee73bfb3392aa6f6e8944aeb13f3f4036/efficientsam_ti_encoder.onnx",
+    "revision": "spaces/yunyangx/EfficientSAM@d8dbb1eee73bfb3392aa6f6e8944aeb13f3f4036",
+    "sha256": "84ed466ffcc5c1f8d08409bc34a23bb364ab2c15e402cb12d4335a42be0e0951",
+    "sizeBytes": 24799761
+   },
+   {
+    "file": "efficientsam_ti_decoder.onnx",
+    "url": "https://huggingface.co/spaces/yunyangx/EfficientSAM/resolve/d8dbb1eee73bfb3392aa6f6e8944aeb13f3f4036/efficientsam_ti_decoder.onnx",
+    "revision": "spaces/yunyangx/EfficientSAM@d8dbb1eee73bfb3392aa6f6e8944aeb13f3f4036",
+    "sha256": "a62f8fa5ea080447c0689418d69e58f1e83e0b7adf9c142e2bd9bcc8045c0b11",
+    "sizeBytes": 16565728
+   }
+  ],
+  "runtimes": [
+   {
+    "runtime": "openvino",
+    "devices": [
+     "CPU",
+     "GPU"
     ],
-    "runtimes": [
-      {
-        "runtime": "whisper.cpp",
-        "devices": [
-          "CPU"
-        ],
-        "validated": true
-      }
+    "validated": true
+   }
+  ],
+  "notes": "Loaded and run on this PC in the 2026-11-12 spike (docs/PHOTO_MODEL_PROPOSAL.md)."
+ },
+ {
+  "id": "migan",
+  "name": "MI-GAN 512 (object removal)",
+  "version": "1",
+  "category": "vision",
+  "description": "Fills removed objects and painted areas from their surroundings.",
+  "required": false,
+  "license": "MIT code and weights (Picsart-AI-Research/MI-GAN; trained on Places2, research dataset terms: review before distribution)",
+  "minimumRamGb": 8,
+  "validation": "none",
+  "artifacts": [
+   {
+    "file": "migan_pipeline_v2.onnx",
+    "url": "https://huggingface.co/andraniksargsyan/migan/resolve/406830d0fa60666da0071c342ad2fbc8f30c5c64/migan_pipeline_v2.onnx",
+    "revision": "andraniksargsyan/migan@406830d0fa60666da0071c342ad2fbc8f30c5c64",
+    "sha256": "6f1f3530a1a2324b19752018ce756088b07973cda8d7d890034ace5c8a48c40b",
+    "sizeBytes": 28079181
+   }
+  ],
+  "runtimes": [
+   {
+    "runtime": "opencv-dnn",
+    "devices": [
+     "CPU"
     ],
-    "notes": "Used automatically by transcription when installed (whisper.cpp --vad). Measured on owner footage: removes noise hallucination loops, small model 53 s -> 33 s for 5 min."
-  }
+    "validated": true
+   },
+   {
+    "runtime": "openvino",
+    "devices": [
+     "CPU",
+     "GPU"
+    ],
+    "validated": false
+   }
+  ],
+  "notes": "OpenVINO: the CPU plug-in rejects the graph and the GPU output is wrong (spike 2026-11-12), so it runs in OpenCV DNN on the CPU. Loaded and run on this PC in the 2026-11-12 spike (docs/PHOTO_MODEL_PROPOSAL.md)."
+ },
+ {
+  "id": "depth-anything-v2-small",
+  "name": "Depth Anything V2 Small",
+  "version": "1",
+  "category": "vision",
+  "description": "How far each part of the photo is, for the camera-like background blur.",
+  "required": false,
+  "license": "Apache-2.0 (Small only; ONNX export by onnx-community)",
+  "minimumRamGb": 8,
+  "validation": "none",
+  "artifacts": [
+   {
+    "file": "model.onnx",
+    "url": "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/4472b7362082ad9968fee890ca0f1e5aca36b93d/onnx/model.onnx",
+    "revision": "onnx-community/depth-anything-v2-small@4472b7362082ad9968fee890ca0f1e5aca36b93d",
+    "sha256": "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c",
+    "sizeBytes": 99060839
+   }
+  ],
+  "runtimes": [
+   {
+    "runtime": "openvino",
+    "devices": [
+     "GPU",
+     "CPU"
+    ],
+    "validated": true
+   }
+  ],
+  "notes": "Loaded and run on this PC in the 2026-11-12 spike (docs/PHOTO_MODEL_PROPOSAL.md)."
+ },
+ {
+  "id": "modnet",
+  "name": "MODNet portrait matting",
+  "version": "1",
+  "category": "vision",
+  "description": "Keeps people (hair, shoulders) sharp when the background is blurred.",
+  "required": false,
+  "license": "Apache-2.0 (ZHKKKe/MODNet; ONNX export by Xenova)",
+  "minimumRamGb": 4,
+  "validation": "none",
+  "artifacts": [
+   {
+    "file": "model.onnx",
+    "url": "https://huggingface.co/Xenova/modnet/resolve/fa2fa546052fba4c08921230a26cc69a333fca12/onnx/model.onnx",
+    "revision": "Xenova/modnet@fa2fa546052fba4c08921230a26cc69a333fca12",
+    "sha256": "07c308cf0fc7e6e8b2065a12ed7fc07e1de8febb7dc7839d7b7f15dd66584df9",
+    "sizeBytes": 25888640
+   }
+  ],
+  "runtimes": [
+   {
+    "runtime": "openvino",
+    "devices": [
+     "GPU",
+     "CPU"
+    ],
+    "validated": true
+   }
+  ],
+  "notes": "Loaded and run on this PC in the 2026-11-12 spike (docs/PHOTO_MODEL_PROPOSAL.md)."
+ }
 ]

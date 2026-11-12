@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  autoPhoto, cancelJob, exportPhoto, importPhotos, listPhotos, onJobUpdated, previewPhoto, recommendSounds, removePhoto, setPhotoEdits, submitJob,
-  type ExportOptions, type ExportPreset, type ExportResult, type Job, type Photo, type PhotoEdits,
+  autoPhoto, autoPhotos, cancelJob, relinkPhotos, exportPhoto, importPhotos, listPhotos, onJobUpdated, photoTools, previewPhoto, recommendSounds, removePhoto, setPhotoEdits, submitJob,
+  type ExportOptions, type ExportPreset, type ExportResult, type Job, type Photo, type PhotoEdits, type PhotoTools,
 } from "./api";
 import { dateTime, L } from "./i18n";
 import { clock, LookAndSound, PRESETS, Report } from "./Timeline";
@@ -21,8 +21,12 @@ const GROUPS: [string, Slider[]][] = [
   [L("Sky", "Bầu trời"), [["sky", L("Enhance the sky", "Làm đẹp bầu trời"), 0, 100], ["skyWarmth", L("Sky cool ↔ warm", "Trời lạnh ↔ ấm")]]],
   [L("Detail", "Chi tiết"), [["clarity", L("Clarity", "Độ rõ")], ["dehaze", L("Dehaze", "Khử mờ sương")], ["sharpen", L("Sharpen (edges only)", "Làm nét (chỉ đường viền)"), 0, 100],
     ["denoise", L("Noise reduction", "Khử nhiễu"), 0, 100]]],
-  [L("Effects & frame", "Hiệu ứng & khung"), [["vignette", L("Vignette", "Viền tối")], ["straighten", L("Straighten (°)", "Cân thẳng (°)"), -15, 15]]],
+  [L("Effects & frame", "Hiệu ứng & khung"), [["bokeh", L("Background blur (AI)", "Xoá phông (AI)"), 0, 100], ["vignette", L("Vignette", "Viền tối")],
+    ["straighten", L("Straighten (°)", "Cân thẳng (°)"), -15, 15]]],
+  [L("Face", "Mặt người"), [["blemish", L("Remove spots & marks", "Xoá mụn, thâm"), 0, 100], ["smooth", L("Smooth skin (texture kept)", "Làm mịn da (giữ vân da)"), 0, 100],
+    ["faceLight", L("Brighten skin", "Làm sáng da"), 0, 100]]],
 ];
+type Stroke = { points: number[][]; r: number };
 const LOOKS: [string, string][] = [
   ["none", L("No look", "Không")], ["warm", L("Warm", "Ấm")], ["cool", L("Cool", "Lạnh")], ["vivid", L("Vivid", "Rực rỡ")],
   ["cinematic", L("Cinematic", "Điện ảnh")], ["vintage", L("Vintage", "Cổ điển")], ["bw", L("Black & white", "Đen trắng")],
@@ -78,6 +82,39 @@ function Editor({ photo, onChanged }: { photo: Photo; onChanged: () => void }) {
   const [working, setWorking] = useState<string | null>(null);
   const onError = useCallback((e: string) => setMessage({ ok: false, text: e }), []);
   const { url, busy } = usePreview(photo.id, edits, showMask, onError);
+  const [tools, setTools] = useState<PhotoTools | null>(null);
+  useEffect(() => { photoTools().then(setTools).catch(() => setTools(null)); }, []);
+  const face = tools ? tools.face : null;
+  // Click to remove: each click = one object (EfficientSAM selects it, MI-GAN fills it).
+  const [clicking, setClicking] = useState(false);
+  const removed = edits.remove ?? [];
+  const click = (e: React.MouseEvent<SVGSVGElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const p = [Math.round(((e.clientX - r.left) / r.width) * 10000) / 10000, Math.round(((e.clientY - r.top) / r.height) * 10000) / 10000];
+    setEdits((x) => ({ ...x, remove: [...(x.remove ?? []), { points: [p] }] }));
+  };
+  // Remove-by-painting: strokes in 0..1 of the shown (edited) frame; the worker fills them in.
+  const [brush, setBrush] = useState<number | null>(null);
+  const [stroke, setStroke] = useState<number[][] | null>(null);
+  const [box, setBox] = useState<DOMRect | null>(null);
+  const strokes: Stroke[] = edits.erase ?? [];
+  const at = (e: React.PointerEvent) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    return [Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), Math.min(1, Math.max(0, (e.clientY - r.top) / r.height))];
+  };
+  const paint = {
+    onPointerDown: (e: React.PointerEvent) => { e.currentTarget.setPointerCapture(e.pointerId); setBox(e.currentTarget.getBoundingClientRect()); setStroke([at(e)]); },
+    onPointerMove: (e: React.PointerEvent) => {
+      if (!stroke) return;
+      const p = at(e), q = stroke[stroke.length - 1];
+      if (Math.hypot(p[0] - q[0], p[1] - q[1]) > 0.004) setStroke([...stroke, p]);
+    },
+    onPointerUp: () => {
+      if (stroke && brush) setEdits((x) => ({ ...x, erase: [...(x.erase ?? []), { points: stroke.map((p) => p.map((v) => Math.round(v * 10000) / 10000)), r: brush }] }));
+      setStroke(null);
+    },
+  };
+  const px = (r: number) => (box ? 2 * r * Math.max(box.width, box.height) : 10);
   const saved = useRef(JSON.stringify(photo.edits ?? {}));
 
   // Save shortly after the last change; each save is one undo step.
@@ -151,6 +188,17 @@ function Editor({ photo, onChanged }: { photo: Photo; onChanged: () => void }) {
           <label className="flex items-center gap-1 text-xs text-zinc-500">
             <input type="checkbox" checked={showMask} onChange={(e) => setShowMask(e.target.checked)} /> {L("Show sky area", "Hiện vùng trời")}
           </label>
+          {tools?.select && (
+            <button className={clicking ? btn.primary : btn.secondary} onClick={() => { setClicking(!clicking); setBrush(null); }}
+              title={L("Click on a person or object to remove it (AI selects it and fills the background)", "Bấm vào người hoặc vật để xoá (AI tự chọn đúng vật và vẽ lại nền)")}>
+              👆 {clicking ? L("Clicking: done", "Đang chọn: xong") : L("Click to remove", "Bấm để xoá vật")}
+            </button>
+          )}
+          <button className={brush ? btn.primary : btn.secondary} onClick={() => { setBrush(brush ? null : 0.02); setClicking(false); }}
+            title={L("Paint over what should disappear (a sign, a stain, a passer-by); it is filled from its surroundings",
+              "Tô lên thứ cần xoá (biển hiệu, vết bẩn, người qua đường); app lấp lại bằng vùng xung quanh")}>
+            🖌 {brush ? L("Painting: done", "Đang tô: xong") : L("Remove by painting", "Xoá vùng tô")}
+          </button>
           <button className={`${btn.primary} ml-auto`} disabled={!!working}
             onClick={() => run(L("Exporting full size…", "Đang xuất ảnh cỡ gốc…"), async () => {
               await setPhotoEdits(photo.id, edits);
@@ -160,9 +208,46 @@ function Editor({ photo, onChanged }: { photo: Photo; onChanged: () => void }) {
             {L("Export photo", "Xuất ảnh")}
           </button>
         </div>
+        {brush !== null && (
+          <div className="mb-2 flex flex-wrap items-center gap-3 rounded-lg border border-indigo-300 bg-indigo-50 px-3 py-2 text-xs dark:border-indigo-800 dark:bg-indigo-950/30">
+            <span>{L("Paint over what should disappear, then let go.", "Tô lên vùng cần xoá rồi thả chuột.")}</span>
+            <label className="flex items-center gap-1">{L("Brush", "Cỡ cọ")}
+              <input type="range" min={0.004} max={0.08} step={0.002} value={brush} onChange={(e) => setBrush(Number(e.target.value))} />
+            </label>
+            <button className={btn.link} disabled={strokes.length === 0} onClick={() => setEdits((x) => ({ ...x, erase: strokes.slice(0, -1) }))}>{L("Remove last stroke", "Bỏ nét cuối")}</button>
+            <button className={btn.link} disabled={strokes.length === 0} onClick={() => setEdits((x) => ({ ...x, erase: [] }))}>{L("Clear all", "Bỏ hết vùng tô")}</button>
+            <span className="text-zinc-500">{tools?.inpaint
+              ? L("Filled by AI (MI-GAN) from the surroundings.", "AI (MI-GAN) vẽ lại vùng tô từ phần xung quanh.")
+              : L("Best for small things; large areas come out soft.", "Hợp với vật nhỏ; vùng lớn sẽ hơi nhoè.")}</span>
+          </div>
+        )}
+        {clicking && (
+          <div className="mb-2 flex flex-wrap items-center gap-3 rounded-lg border border-indigo-300 bg-indigo-50 px-3 py-2 text-xs dark:border-indigo-800 dark:bg-indigo-950/30">
+            <span>{L("Click on each person or object to remove. The first AI use takes 10–15 s to load the models.", "Bấm vào từng người / vật cần xoá. Lần dùng AI đầu tiên mất 10–15 giây để nạp model.")}</span>
+            <button className={btn.link} disabled={removed.length === 0} onClick={() => setEdits((x) => ({ ...x, remove: removed.slice(0, -1) }))}>{L("Undo last removal", "Bỏ lần xoá cuối")}</button>
+            <button className={btn.link} disabled={removed.length === 0} onClick={() => setEdits((x) => ({ ...x, remove: [] }))}>{L("Restore all", "Khôi phục tất cả")}</button>
+          </div>
+        )}
         <div className="relative flex min-h-[24rem] items-center justify-center rounded-xl bg-zinc-950">
           {(showBefore ? before : url) ? (
-            <img className="max-h-[65vh] max-w-full object-contain" src={(showBefore ? before : url)!} alt="" />
+            <div className="relative inline-block">
+              <img className="block max-h-[65vh] max-w-full object-contain" src={(showBefore ? before : url)!} alt="" />
+              {clicking && !showBefore && (
+                <svg className="absolute inset-0 h-full w-full cursor-pointer" viewBox="0 0 1 1" preserveAspectRatio="none" onClick={click}>
+                  {removed.flatMap((o, i) => o.points.map((p, k) => (
+                    <circle key={`${i}-${k}`} cx={p[0]} cy={p[1]} r={0.008} fill="rgb(239 68 68 / 0.8)" stroke="white" strokeWidth={0.002} vectorEffect="non-scaling-stroke" />
+                  )))}
+                </svg>
+              )}
+              {brush !== null && !showBefore && (
+                <svg className="absolute inset-0 h-full w-full cursor-crosshair touch-none" viewBox="0 0 1 1" preserveAspectRatio="none" {...paint}>
+                  {[...strokes, ...(stroke ? [{ points: stroke, r: brush }] : [])].map((s, i) => (
+                    <polyline key={i} points={s.points.map((p) => p.join(",")).join(" ")} fill="none" stroke="rgb(239 68 68 / 0.45)"
+                      strokeWidth={px(s.r)} strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+                  ))}
+                </svg>
+              )}
+            </div>
           ) : (
             <p className="text-sm text-zinc-400">{L("Preparing preview…", "Đang chuẩn bị xem trước…")}</p>
           )}
@@ -210,6 +295,14 @@ function Editor({ photo, onChanged }: { photo: Photo; onChanged: () => void }) {
             {title === GROUPS[2][0] && (
               <p className="text-xs text-zinc-500">{L("Brings out the photo's own sky (clouds, depth, colour); nothing is pasted in. Tick “Show sky area” to check what counts as sky.",
                 "Làm nổi chính bầu trời trong ảnh (vân mây, chiều sâu, màu); không ghép trời khác. Tick “Hiện vùng trời” để xem vùng được coi là trời.")}</p>
+            )}
+            {title === GROUPS[5][0] && (
+              <p className="text-xs text-zinc-500">{face === false
+                ? L("Needs the face models (Settings › AI models: YuNet, Face Landmarker).", "Cần model mặt người (Cài đặt › Model AI: YuNet, Face Landmarker).")
+                : L("Faces are found automatically; eyes, brows and lips stay untouched; the face is not redrawn.", "Tự tìm khuôn mặt; mắt, lông mày, môi giữ nguyên; không vẽ lại khuôn mặt.")}</p>
+            )}
+            {title === GROUPS[4][0] && tools && !tools.bokeh && (
+              <p className="text-xs text-zinc-500">{L("Background blur needs the depth model (Settings › AI models).", "Xoá phông cần model độ sâu (Cài đặt › Model AI).")}</p>
             )}
             {title === GROUPS[4][0] && (
               <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
@@ -360,6 +453,8 @@ export default function PhotoEditor() {
   const [message, setMessage] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<number | null>(null);
   const [video, setVideo] = useState(false);
+  const [autoImport, setAutoImport] = useState(() => { try { return localStorage.getItem("memora.photoAutoImport") !== "0"; } catch { return true; } });
+  const [autoing, setAutoing] = useState(false);
   const [picked, setPicked] = useState<number[]>([]);
   const load = useCallback(() => { listPhotos().then(setPhotos).catch((e) => setMessage(String(e))); }, []);
   useEffect(load, [load]);
@@ -388,7 +483,7 @@ export default function PhotoEditor() {
     setImporting(true);
     setMessage(null);
     try {
-      const r = await importPhotos(picked);
+      const r = await importPhotos(picked, autoImport);
       load();
       if (r.ids.length) setSelected(r.ids[0]);
       setMessage(r.failed.length ? r.failed.map((f) => `${fileName(f.path)}: ${f.error}`).join(" · ") : null);
@@ -408,10 +503,49 @@ export default function PhotoEditor() {
             {video ? L("← Back to editing", "← Quay lại chỉnh ảnh") : L("🎬 Make a video", "🎬 Tạo video từ ảnh")}
           </button>
         )}
+        {photos && photos.some((p) => !p.edits) && !video && (
+          <button className={btn.secondary} disabled={autoing}
+            title={L("Suggested light, colour, sky and face edits for every photo you have not edited yet", "Gợi ý ánh sáng, màu, trời và chỉnh mặt cho mọi ảnh chưa chỉnh")}
+            onClick={async () => {
+              setAutoing(true);
+              try {
+                const n = await autoPhotos(photos.filter((p) => !p.edits).map((p) => p.id));
+                setMessage(L(`${n} photos edited automatically — open one to adjust, or Reset it.`, `Đã tự động chỉnh ${n} ảnh — mở từng ảnh để chỉnh thêm, hoặc Đặt lại.`));
+                load();
+              } catch (e) {
+                setMessage(String(e));
+              } finally {
+                setAutoing(false);
+              }
+            }}>
+            ✦ {autoing ? L("Editing…", "Đang chỉnh…") : L(`Auto-edit unedited photos (${photos.filter((p) => !p.edits).length})`, `Tự động chỉnh ảnh chưa chỉnh (${photos.filter((p) => !p.edits).length})`)}
+          </button>
+        )}
+        <label className="flex items-center gap-1 text-xs text-zinc-500" title={L("New photos get the suggested edits right away (Reset undoes them)", "Ảnh mới được chỉnh tự động ngay (Đặt lại để bỏ)")}>
+          <input type="checkbox" checked={autoImport} onChange={(e) => { setAutoImport(e.target.checked); try { localStorage.setItem("memora.photoAutoImport", e.target.checked ? "1" : "0"); } catch { /* convenience */ } }} />
+          {L("Auto-edit new photos", "Tự chỉnh ảnh mới")}
+        </label>
         <button className={video ? btn.secondary : btn.primary} disabled={importing} onClick={add}>{importing ? L("Adding…", "Đang thêm…") : L("+ Add photos", "+ Thêm ảnh")}</button>
       </span>
     }>
       {message && <p className="mb-2 text-sm text-amber-600">{message}</p>}
+      {photos && photos.some((p) => p.missing) && (
+        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm dark:border-amber-800 dark:bg-amber-950/30">
+          <span>{L(`${photos.filter((p) => p.missing).length} photos are no longer where they were added (moved or renamed). Their edits are kept.`,
+            `${photos.filter((p) => p.missing).length} ảnh không còn ở chỗ cũ (đã chuyển hoặc đổi tên). Các chỉnh sửa vẫn được giữ.`)}</span>
+          <button className={btn.secondary} onClick={async () => {
+            const folder = await open({ directory: true, title: L("Folder the photos were moved to", "Thư mục chứa ảnh đã chuyển tới") });
+            if (typeof folder !== "string") return;
+            try {
+              const n = await relinkPhotos(folder);
+              setMessage(L(`${n} photos found again.`, `Đã tìm lại ${n} ảnh.`));
+              load();
+            } catch (e) {
+              setMessage(String(e));
+            }
+          }}>{L("Find them in a folder…", "Tìm lại trong thư mục…")}</button>
+        </div>
+      )}
       {photos?.length === 0 && (
         <div className="rounded-xl border border-dashed border-zinc-300 p-8 text-center dark:border-zinc-700">
           <p className="text-sm text-zinc-500">{L("No photos yet. Photos are read in place and never changed; edits are saved separately and can be undone.",
@@ -429,6 +563,7 @@ export default function PhotoEditor() {
                   title={`${fileName(p.path)}${p.takenAt ? ` · ${dateTime(new Date(p.takenAt))}` : ""}`}>
                   <Thumb path={p.thumb} className="aspect-square w-full" />
                   {p.edits && Object.keys(p.edits).length > 0 && <span className="absolute bottom-1 left-1 rounded bg-indigo-600 px-1 text-[10px] text-white">✎</span>}
+                  {p.missing && <span className="absolute inset-x-0 top-1/3 text-center text-xs text-amber-400">⚠ {L("moved", "đã chuyển")}</span>}
                   {video && picked.includes(p.id) && <span className="absolute left-1 top-1 rounded-full bg-indigo-600 px-1.5 text-xs text-white">{picked.indexOf(p.id) + 1}</span>}
                 </button>
                 {confirming === p.id ? (

@@ -13,8 +13,11 @@ import time
 import cv2
 import numpy as np
 
+import photo_ai
+
 KEYS = ("exposure", "contrast", "highlights", "shadows", "whites", "blacks", "temperature", "tint", "vibrance",
-        "saturation", "clarity", "dehaze", "sharpen", "denoise", "sky", "skyWarmth", "vignette", "straighten")
+        "saturation", "clarity", "dehaze", "sharpen", "denoise", "sky", "skyWarmth", "vignette", "straighten",
+        "blemish", "smooth", "faceLight", "bokeh")  # AI keys 0..100 (photo_ai.py), no-ops without their models
 # HSL bands: centre hue in degrees; each edit is [hue shift, saturation, lightness].
 BANDS = {"red": 0, "orange": 30, "yellow": 60, "green": 120, "aqua": 180, "blue": 225, "purple": 270, "magenta": 315}
 LOOKS = ("none", "warm", "cool", "vivid", "cinematic", "bw", "vintage")
@@ -211,10 +214,53 @@ def look(x, name):
     return x
 
 
+# ---------------------------------------------------------------- region removal and face retouch
+
+def painted(shape, strokes):
+    """Mask (uint8 0/255) of the painted strokes: [{points: [[x, y]…] 0..1 of the rendered frame, r: radius 0..1 of its
+    long side}]."""
+    h, w = shape[:2]
+    m = np.zeros((h, w), np.uint8)
+    for s in strokes or []:
+        pts = (np.array(s.get("points") or [], np.float32).reshape(-1, 2) * [w, h]).astype(np.int32)
+        r = max(1, int(round(float(s.get("r", 0.02)) * max(h, w))))
+        if len(pts) == 1:
+            cv2.circle(m, (int(pts[0][0]), int(pts[0][1])), r, 255, -1, cv2.LINE_AA)
+        elif len(pts) > 1:
+            cv2.polylines(m, [pts], False, 255, thickness=2 * r, lineType=cv2.LINE_AA)
+    return m
+
+
+def erase(x, strokes):
+    """Classical fallback for painted areas (no inpainting model): inpainting first at 1/4 size for the broad fill,
+    then at full size for the detail. Good for small things; large areas come out soft (MI-GAN does those)."""
+    h, w = x.shape[:2]
+    m = painted(x.shape, strokes)
+    if not m.any():
+        return x
+    m = cv2.dilate((m > 0).astype(np.uint8) * 255, np.ones((3, 3), np.uint8))
+    bgr = cv2.cvtColor(_u8(x), cv2.COLOR_RGB2BGR)
+    small = cv2.resize(bgr, (max(1, w // 4), max(1, h // 4)), interpolation=cv2.INTER_AREA)
+    sm = cv2.resize(m, (small.shape[1], small.shape[0]), interpolation=cv2.INTER_NEAREST)
+    coarse = cv2.resize(cv2.inpaint(small, sm, 5, cv2.INPAINT_TELEA), (w, h), interpolation=cv2.INTER_CUBIC)
+    filled = np.where(m[..., None] > 0, coarse, bgr)
+    edge = cv2.morphologyEx(m, cv2.MORPH_GRADIENT, np.ones((5, 5), np.uint8))
+    fine = cv2.inpaint(filled, edge, 3, cv2.INPAINT_TELEA)
+    soft = cv2.GaussianBlur(m.astype(np.float32) / 255, (0, 0), 1.5)[..., None]
+    out = fine.astype(np.float32) * soft + bgr.astype(np.float32) * (1 - soft)
+    return cv2.cvtColor(np.clip(out, 0, 255).astype(np.uint8), cv2.COLOR_BGR2RGB).astype(np.float32) / 255
+
+
 def render(x, e, show_mask=False):
     """Apply the edit stack to float RGB x (already resized); returns float RGB 0..1."""
     v = lambda k: float(np.clip(float(e.get(k, 0) or 0), -100, 100)) / 100
     x = geometry(x, e)
+    if e.get("erase") or e.get("remove"):
+        # Clicked objects and painted areas: MI-GAN when installed; painted areas fall back to classical inpainting.
+        ai = photo_ai.remove(x, e.get("remove"), painted(x.shape, e.get("erase")) > 0)
+        x = ai if ai is not None else erase(x, e.get("erase"))
+    if any(float(e.get(n, 0) or 0) > 0 for n in ("blemish", "smooth", "faceLight")):
+        x = photo_ai.retouch(x, *(float(np.clip(float(e.get(n, 0) or 0), 0, 100)) / 100 for n in ("blemish", "smooth", "faceLight")))
     k = max(x.shape[:2]) / REF_SIDE
     if v("denoise") > 0:
         n = v("denoise")
@@ -285,6 +331,8 @@ def render(x, e, show_mask=False):
     if v("sky") > 0:
         x = enhance_sky(x, v("sky"), v("skyWarmth"), k, mask)
     x = look(x, e.get("look", "none"))
+    if v("bokeh") > 0:
+        x = photo_ai.bokeh(x, v("bokeh"))
     if v("vignette"):
         h, w = x.shape[:2]
         yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
@@ -394,7 +442,10 @@ def auto(path):
     sky = float(sky_mask(x).mean())
     if sky > 0.08:
         e["sky"] = 35
-    return {"edits": e, "skyShare": round(sky, 3)}
+    n_faces = len(photo_ai.faces(x))
+    if n_faces:
+        e.update({"blemish": 60, "smooth": 35, "faceLight": 15})
+    return {"edits": e, "skyShare": round(sky, 3), "faces": n_faces}
 
 
 # ------------------------------------------------------------------ self-check
@@ -453,4 +504,11 @@ if __name__ == "__main__":
     a = auto(src)
     assert a["skyShare"] > 0.2 and a["edits"]["sky"] == 35, a
     assert taken(src) is None and render_file(src, {}, 100, out, info=True)["taken"] is None, "no EXIF: no date"
+    # Region removal: a dark blot painted over on a plain wall disappears; nothing else changes; no face model = no-op.
+    wall = np.full((200, 300, 3), 0.6, np.float32)
+    wall[90:110, 140:160] = 0.05
+    gone = erase(wall, [{"points": [[0.5, 0.5]], "r": 0.05}])
+    assert abs(float(gone[100, 150].mean()) - 0.6) < 0.05, gone[100, 150]
+    assert np.allclose(gone[:40], wall[:40], atol=0.01)
+    assert erase(wall, []) is wall and photo_ai.retouch(wall, 1, 1, 1) is wall, "no strokes / no face model: unchanged"
     print("photo.py self-check OK", info, a)

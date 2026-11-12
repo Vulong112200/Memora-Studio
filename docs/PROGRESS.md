@@ -98,6 +98,13 @@ See `docs/MODEL_PROPOSAL.md` §4: whisper.cpp b5454 runtime installed in `<data 
 - Bilingual UI (owner decision): Vietnamese default, English in the sidebar; `L(en, vi)` at each string (`i18n.ts`); shared pieces in `ui.tsx`. Backend texts (style descriptions, plan reasons, "Understood" chips, errors) still English/mixed.
 - Verified: `tsc --noEmit`, release build, app window screenshots (Library, Projects step 2 and step 3 on the real library); no frontend unit tests.
 
+#### AI photo tools, auto edit, clean-up (2026-11-12, owner: "chưa thấy chỉnh hết mụn, thâm… xoá theo vùng chọn… chỉnh sửa ảnh tự động", "Chỉnh ảnh bằng AI: hãy thực hiện", "dọn hết dữ liệu rác") — awaiting review
+- Clean-up (owner chose the optional items): spike builds (git-ignored) and `cache\spike`, OpenCLIP v1–v3 installs and exports, whisper leftovers, test project #6 and the 6 test stills, test projects #1–#3, the older Nam Cát Tiên exports (the newest recap is in the owner's `C:\Users\vu\Videos`). Data folder 57 → 47 GB; repo folder 14 GB (10 GB is the regenerable `target\debug`).
+- Model research by a sub-agent → `docs/PHOTO_MODEL_PROPOSAL.md`; owner approved the full set. Spike on this PC (see the proposal's status line); Real-ESRGAN not installed.
+- Worker `photo_ai.py` (retouch with face mesh, click-to-remove, AI fill of painted areas, background blur); `photo.py` render hooks; Rust `photos::photo_models` / `with_models`, `auto_unedited`, `repair_thumbs`, `relink`; commands `auto_photos`, `photo_tools`, `relink_photos`; Photos page tools, batch auto, auto on import, moved-photos banner.
+- Found while testing: the owner had moved the photos to `Downloads\Image` (relinked: 11) and my clean-up had removed the photo thumbnails (now re-created automatically).
+- Verified: 101 Rust tests, `python photo_ai.py`, `python photo.py`, `tsc`, release build; on the owner's photos (outputs only in the scratchpad): acne removed on a rotated face, a white ring removed with one click, background blur on two portraits; in the app: thumbnails back, Auto on one portrait (face values added).
+
 #### Photos in Smart edit (2026-11-12, owner: "tiếp tục thực hiện") — slice 2 (+ request words of slice 3), awaiting review
 - Photo times now carry their zone (EXIF OffsetTimeOriginal, else this PC's offset); `export::unix_ms` reads zones — photos and UTC video times line up.
 - Migration 12 `photo_analysis`; worker `photo_analyze` (edited photo at 960 px: `frame_metrics` + OpenCLIP `tag_image`, ≈ 0.14 s per photo on the GPU after a 1.4 s first compile, measured on this PC); job `media.photo_analyze`, submitted automatically when the Photos page opens.

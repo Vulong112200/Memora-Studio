@@ -36,6 +36,8 @@ pub struct Photo {
     pub thumb: Option<PathBuf>,
     /// Observations stored (`photo_analysis`), so Smart edit can use the photo.
     pub analyzed: bool,
+    /// The file is no longer at `path` (moved / renamed / drive missing); set by `attach_thumbs`.
+    pub missing: bool,
 }
 
 const COLUMNS: &str =
@@ -54,6 +56,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Photo> {
         imported_at: r.get(7)?,
         thumb: None,
         analyzed: r.get(8)?,
+        missing: false,
     })
 }
 
@@ -89,7 +92,8 @@ pub fn set_edits(c: &Connection, id: i64, edits: &Value) -> Result<(), String> {
     if !(edits.is_object() || edits.is_null()) {
         return Err("Photo edits must be an object.".into());
     }
-    let json = (!edits.is_null()).then(|| edits.to_string());
+    // An empty stack (Reset) is "not edited", so batch auto-edit offers the photo again.
+    let json = edits.as_object().filter(|o| !o.is_empty()).map(|_| edits.to_string());
     match c.execute("UPDATE photos SET edits_json = ?2 WHERE id = ?1", params![id, json]).map_err(err)? {
         0 => Err(format!("Photo {id} not found.")),
         _ => Ok(()),
@@ -103,6 +107,67 @@ pub fn remove(c: &Connection, cache: &Path, id: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// Photo AI models (models.json ids, category vision) and the files photo_ai.py needs from each: tool key → (id, files).
+const PHOTO_MODELS: &[(&str, &str, &[&str])] = &[
+    ("face", "face-yunet", &["face_detection_yunet_2023mar.onnx"]),
+    ("landmarks", "face-landmarker", &["face_landmarker.task"]),
+    ("sam", "efficientsam-ti", &["efficientsam_ti_encoder.onnx", "efficientsam_ti_decoder.onnx"]),
+    ("inpaint", "migan", &["migan_pipeline_v2.onnx"]),
+    ("depth", "depth-anything-v2-small", &["model.onnx"]),
+    ("matte", "modnet", &["model.onnx"]),
+];
+
+/// Installed photo AI models for photo_ai.py `MODELS`: for each tool the files of the newest version folder under
+/// `<data root>\models\vision\<id>\` that has all of them (the Model Manager only creates version folders for verified
+/// installs). A tool whose model is missing is left out, and its edits do nothing.
+pub fn photo_models(root: &Path) -> Value {
+    let mut out = serde_json::Map::new();
+    for (tool, id, files) in PHOTO_MODELS {
+        let dir = root.join("models").join("vision").join(id);
+        let mut versions: Vec<(i64, PathBuf)> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| Some((e.file_name().to_string_lossy().parse::<i64>().ok()?, e.path())))
+            .collect();
+        versions.sort();
+        if let Some((_, v)) = versions.into_iter().rev().find(|(_, v)| files.iter().all(|f| v.join(f).is_file())) {
+            let paths: Vec<PathBuf> = files.iter().map(|f| v.join(f)).collect();
+            out.insert((*tool).into(), if paths.len() == 1 { json!(paths[0]) } else { json!(paths) });
+        }
+    }
+    Value::Object(out)
+}
+
+/// Adds the installed photo AI models to a photo.py job's params.
+fn with_models(mut params: Value, root: Option<&Path>) -> Value {
+    if params.get("models").is_none() {
+        params["models"] = root.map(photo_models).unwrap_or_else(|| json!({}));
+    }
+    params
+}
+
+/// Suggested edits (worker `photo_auto`) for the given photos that have none yet — "auto edit on import" and the
+/// Photos page's batch button. Returns how many photos got edits; a photo that fails is skipped (logged).
+pub fn auto_unedited(c: &Mutex<Result<Connection, String>>, lane: &Lane, ids: &[i64]) -> Result<usize, String> {
+    let mut n = 0;
+    for &id in ids {
+        let p = with(c, |c| get(c, id))?;
+        if !p.edits.is_null() {
+            continue;
+        }
+        match lane.call("photo_auto", json!({"path": p.path})) {
+            Ok(r) if r["edits"].is_object() => {
+                with(c, |c| set_edits(c, id, &r["edits"]))?;
+                n += 1;
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(photo = id, error = %e, "auto edit failed"),
+        }
+    }
+    Ok(n)
+}
+
 pub fn cache_dir(cache: &Path, id: i64) -> PathBuf {
     cache.join("photo").join(id.to_string())
 }
@@ -111,7 +176,37 @@ pub fn attach_thumbs(cache: &Path, photos: &mut [Photo]) {
     for p in photos {
         let t = cache_dir(cache, p.id).join("thumb.jpg");
         p.thumb = t.exists().then_some(t);
+        p.missing = !Path::new(&p.path).is_file();
     }
+}
+
+/// Re-creates thumbnails that are gone from the cache (cache cleared) for photos whose file is still there.
+pub fn repair_thumbs(lane: &Lane, cache: &Path, photos: &mut [Photo]) {
+    for p in photos.iter_mut().filter(|p| p.thumb.is_none() && !p.missing) {
+        let dir = cache_dir(cache, p.id);
+        let out = dir.join("thumb.jpg");
+        let made = std::fs::create_dir_all(&dir).map_err(|e| e.to_string())
+            .and_then(|()| lane.call("photo_render", json!({"path": p.path, "edits": {}, "maxSide": THUMB_SIDE, "out": out, "quality": 85})));
+        match made {
+            Ok(_) => p.thumb = Some(out),
+            Err(e) => tracing::warn!(photo = p.id, error = %e, "thumbnail not re-created"),
+        }
+    }
+}
+
+/// Finds photos that are no longer at their path in `folder` (the user moved them there): same file name and size,
+/// directly in the folder. Returns how many were found again; edits, analysis and timeline clips stay attached.
+pub fn relink(c: &Connection, folder: &Path) -> Result<usize, String> {
+    let mut n = 0;
+    for p in list(c)?.into_iter().filter(|p| !Path::new(&p.path).is_file()) {
+        let Some(name) = Path::new(&p.path).file_name() else { continue };
+        let candidate = folder.join(name);
+        let same = std::fs::metadata(&candidate).is_ok_and(|m| m.is_file() && m.len() as i64 == p.size);
+        if same && c.execute("UPDATE photos SET path = ?2 WHERE id = ?1", params![p.id, candidate.to_string_lossy()]).is_ok() {
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 /// A worker process used only by the photo editor (protocol and script shared with the job-queue worker).
@@ -135,6 +230,7 @@ impl Lane {
             *guard = Some(Worker::spawn(&worker::resolve((self.data_root)().as_deref())?, &self.job_object)?);
         }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let params = if kind.starts_with("photo_") { with_models(params, (self.data_root)().as_deref()) } else { params };
         let job = Job { id, kind: kind.into(), params, status: Status::Running, done: 0, total: 0, result: None, error: None };
         let (outcome, alive) = worker::run_on(guard.as_mut().unwrap(), &job, &|_, _| {}, &|| false);
         if !alive {
@@ -322,7 +418,7 @@ pub fn analyze_job(
         let sub = Job {
             id: job.id,
             kind: "photo_analyze".into(),
-            params: json!({"path": p.path, "edits": p.edits, "modelDir": model_dir}),
+            params: with_models(json!({"path": p.path, "edits": p.edits, "modelDir": model_dir}), env.cache.parent()),
             status: Status::Running, done: 0, total: 0, result: None, error: None,
         };
         match ai(&sub, &|_, _| {}, cancelled) {
@@ -437,7 +533,7 @@ pub fn still(
     let sub = Job {
         id: job.id,
         kind: "photo_render".into(),
-        params: json!({"path": p.path, "edits": p.edits, "maxSide": VIDEO_SIDE, "out": file.0, "quality": 95}),
+        params: with_models(json!({"path": p.path, "edits": p.edits, "maxSide": VIDEO_SIDE, "out": file.0, "quality": 95}), dir.parent().and_then(Path::parent)),
         status: Status::Running, done: 0, total: 0, result: None, error: None,
     };
     let r = match ai(&sub, &|_, _| {}, cancelled) {
@@ -459,6 +555,51 @@ mod tests {
     }
 
     #[test]
+    fn photo_models_take_the_newest_complete_install() {
+        let root = std::env::temp_dir().join(format!("memora-photo-models-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(photo_models(&root), json!({}));
+        let face = root.join("models").join("vision").join("face-yunet");
+        for v in ["1", "2"] {
+            std::fs::create_dir_all(face.join(v)).unwrap();
+            std::fs::write(face.join(v).join("face_detection_yunet_2023mar.onnx"), b"x").unwrap();
+        }
+        std::fs::create_dir_all(face.join("3")).unwrap(); // empty: an install that is not there
+        let sam = root.join("models").join("vision").join("efficientsam-ti").join("1");
+        std::fs::create_dir_all(&sam).unwrap();
+        std::fs::write(sam.join("efficientsam_ti_encoder.onnx"), b"x").unwrap(); // decoder missing: tool off
+        let m = photo_models(&root);
+        assert_eq!(m["face"], json!(face.join("2").join("face_detection_yunet_2023mar.onnx")));
+        assert!(m.get("sam").is_none() && m.get("inpaint").is_none());
+        std::fs::write(sam.join("efficientsam_ti_decoder.onnx"), b"x").unwrap();
+        assert_eq!(photo_models(&root)["sam"].as_array().map(Vec::len), Some(2));
+        assert_eq!(with_models(json!({"path": "a"}), Some(&root))["models"]["face"], m["face"]);
+        assert_eq!(with_models(json!({"models": {}}), Some(&root))["models"], json!({}), "an explicit value is kept");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn moved_photos_are_found_again() {
+        let dir = std::env::temp_dir().join(format!("memora-relink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("new")).unwrap();
+        let c = db();
+        let old = dir.join("a.jpg");
+        std::fs::write(&old, b"12345").unwrap();
+        let id = with(&c, |c| upsert(c, &old.to_string_lossy(), 5, None)).unwrap();
+        let other = with(&c, |c| upsert(c, &dir.join("b.jpg").to_string_lossy(), 3, None)).unwrap();
+        std::fs::rename(&old, dir.join("new").join("a.jpg")).unwrap();
+        std::fs::write(dir.join("new").join("b.jpg"), b"different size").unwrap();
+        let mut ps = with(&c, list).unwrap();
+        attach_thumbs(&dir, &mut ps);
+        assert!(ps.iter().all(|p| p.missing));
+        assert_eq!(with(&c, |c| relink(c, &dir.join("new"))).unwrap(), 1, "same name and size only");
+        assert_eq!(with(&c, |c| get(c, id)).unwrap().path, dir.join("new").join("a.jpg").to_string_lossy());
+        assert_eq!(with(&c, |c| get(c, other)).unwrap().path, dir.join("b.jpg").to_string_lossy());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn rows_edits_and_dates() {
         let c = db();
         let id = with(&c, |c| upsert(c, r"E:\Ảnh\a.jpg", 10, Some(0))).unwrap();
@@ -468,6 +609,8 @@ mod tests {
         let p = with(&c, |c| get(c, id)).unwrap();
         assert_eq!((p.size, p.width, p.edits["sky"].as_i64()), (12, Some(4000), Some(50)));
         assert!(with(&c, |c| set_edits(c, id, &json!([1]))).is_err(), "only an object");
+        with(&c, |c| set_edits(c, id, &json!({}))).unwrap();
+        assert!(with(&c, |c| get(c, id)).unwrap().edits.is_null(), "an empty stack is stored as not edited");
         with(&c, |c| set_edits(c, id, &Value::Null)).unwrap();
         assert!(with(&c, |c| get(c, id)).unwrap().edits.is_null());
         assert!(with(&c, |c| set_edits(c, 999, &json!({}))).is_err());

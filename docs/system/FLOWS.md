@@ -1,6 +1,6 @@
 # Processing flows
 
-Last verified: 2026-11-12 against commit `7eeb0bd` + uncommitted changes. Index: [README.md](README.md). Kept current by the `sync-docs` skill.
+Last verified: 2026-11-12 against commit `12706f3` + uncommitted changes. Index: [README.md](README.md). Kept current by the `sync-docs` skill.
 
 What happens, step by step, when the app starts or the user does something. Function names are
 `module::function` in `apps/desktop/src-tauri/src/` (details in [BACKEND.md](BACKEND.md)); UI files are in
@@ -136,6 +136,10 @@ Photos page (`PhotoEditor.tsx`) "+ Add photos" (file dialog, `photos::EXTENSIONS
 ## 19. Video from photos
 
 Photos page **🎬 Make a video** → clicking thumbnails picks photos in order (number badge); **All photos** / **Sort by date taken** / **Clear**. The timeline strip shows each photo (number, seconds; ◀ ✕ ▶ to move or leave out) and the transition between photos. Settings: seconds per photo, format (`PRESETS`), file name, and the project's Look & sound panel without clip sound / ducking / speech subtitles (transition, colour, fill, fades, music, loudness, titles); kept in `localStorage` `memora.photoVideo`. **Create video** → `submit_job("media.photo_video", {photoIds, photoMs, preset, options, name})` → `photos::video_job`: each photo rendered with its edits (worker `photo_render`, 2880 px) into `cache\render\` → still segments → `export::finish` (library music, render, loudness, validation) → `photos\exports\<name>-<preset>[-N].mp4`, stills deleted. Progress and the validation report shown under the panel; photos are never written.
+
+## 21. AI photo tools (2026-11-12)
+
+Models installed through the Model Manager (`models.install`, manifests `face-yunet`, `face-landmarker`, `efficientsam-ti`, `migan`, `depth-anything-v2-small`, `modnet`; downloads approved by the owner 2026-11-12). Every `photo_*` worker call gets the installed model paths (`photos::with_models`). Photos page: `photo_tools` decides which tools show. **👆 Click to remove** → clicks stored in `edits.remove` → preview: EfficientSAM selects, MI-GAN fills. **🖌 Remove by painting** → `edits.erase` → MI-GAN (classical fill without it). Face sliders → `photo_ai.retouch`; Background blur → `photo_ai.bokeh`. **✦ Auto** (one photo) / **Auto-edit unedited photos** (`auto_photos`) / auto on import add face retouch when faces are found. Moved photos: ⚠ badge + **Find them in a folder…** → `relink_photos`. All edits stay non-destructive; exports render them at full size.
 
 ## 20. Photos in Smart edit (2026-11-12)
 

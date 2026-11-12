@@ -339,7 +339,11 @@ export const deleteProject = (id: number) => invoke<void>("delete_project", { id
 
 /** Photo editor (src-tauri/src/photos.rs, workers/ai-worker/photo.py). Edit values are -100..100 (0 = unchanged). */
 export interface PhotoEdits {
-  [key: string]: number | string | Record<string, number[]> | undefined;
+  [key: string]: number | string | Record<string, number[]> | { points: number[][]; r: number }[] | { points: number[][]; labels?: number[] }[] | undefined;
+  /** Objects removed by clicking on them (EfficientSAM + MI-GAN): click points 0..1 of the shown frame. */
+  remove?: { points: number[][]; labels?: number[] }[];
+  /** Painted areas to remove: points 0..1 of the shown frame, r = brush radius 0..1 of its long side. */
+  erase?: { points: number[][]; r: number }[];
   look?: string;
   crop?: string;
   rotate?: number;
@@ -357,10 +361,20 @@ export interface Photo {
   thumb: string | null;
   /** Observations stored (job `media.photo_analyze`): Smart edit can use it. */
   analyzed: boolean;
+  /** The file is no longer at `path` (moved or renamed): `relinkPhotos` finds it again. */
+  missing: boolean;
 }
 export interface PhotoImport { ids: number[]; failed: { path: string; error: string }[] }
 export const listPhotos = () => invoke<Photo[]>("list_photos");
-export const importPhotos = (paths: string[]) => invoke<PhotoImport>("import_photos", { paths });
+/** `auto`: give new photos the suggested edits (worker `photo_auto`) right away. */
+export const importPhotos = (paths: string[], auto = false) => invoke<PhotoImport>("import_photos", { paths, auto });
+/** Suggested edits for the photos that have none yet; returns how many were edited. */
+export const autoPhotos = (ids: number[]) => invoke<number>("auto_photos", { ids });
+/** Photos moved to `folder` (same name and size) are found again; returns how many. */
+export const relinkPhotos = (folder: string) => invoke<number>("relink_photos", { folder });
+/** What the photo tools can do here: `face` = face detector installed (retouch works). */
+export interface PhotoTools { face: boolean; mesh: boolean; select: boolean; inpaint: boolean; bokeh: boolean; matte: boolean }
+export const photoTools = () => invoke<PhotoTools>("photo_tools");
 export const setPhotoEdits = (id: number, edits: PhotoEdits | null) => invoke<void>("set_photo_edits", { id, edits });
 /** Returns the cache file of a ≤ 1600 px preview (`before` = without edits). */
 export const previewPhoto = (id: number, edits: PhotoEdits, showMask: boolean, before: boolean) =>

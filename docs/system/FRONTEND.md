@@ -2,7 +2,7 @@
 
 The React webview of the Tauri app: a sidebar with five pages (Library, Projects, Photos, Jobs, Settings), a "Next step" banner and a job bar; cards call Rust commands through typed wrappers and follow background jobs through `job-updated` events. Bilingual (Vietnamese default, English).
 
-Last verified: 2026-11-12 against commit `7eeb0bd` + uncommitted changes.
+Last verified: 2026-11-12 against commit `12706f3` + uncommitted changes.
 
 Index of all system docs: [README.md](README.md). The `sync-docs` skill (`.claude/skills/sync-docs/`) keeps this file current; run it after any change under `apps/desktop/` outside `src-tauri/`.
 
@@ -165,7 +165,10 @@ Constants: `LOW_COMMIT_BYTES = 8 * 1024 ** 3` (8 GiB; Production.md §9.2 small 
 | `cancelJob(id)` | `cancel_job` | `{ id }` | `void` |
 | `getWorkerInfo()` | `get_worker_info` | — | `WorkerInfo \| null` (null = worker not running) |
 | `listPhotos()` | `list_photos` | — | `Photo[]` |
-| `importPhotos(paths)` | `import_photos` | `{ paths }` | `PhotoImport { ids, failed[] }` |
+| `importPhotos(paths, auto?)` | `import_photos` | `{ paths, auto }` | `PhotoImport { ids, failed[] }` |
+| `autoPhotos(ids)` | `auto_photos` | `{ ids }` | `number` (edited) |
+| `photoTools()` | `photo_tools` | — | `PhotoTools {face, mesh, select, inpaint, bokeh, matte}` |
+| `relinkPhotos(folder)` | `relink_photos` | `{ folder }` | `number` (found again) |
 | `setPhotoEdits(id, edits)` | `set_photo_edits` | `{ id, edits }` (`PhotoEdits` or `null`) | `void` |
 | `previewPhoto(id, edits, showMask, before)` | `preview_photo` | `{ id, edits, showMask, before }` | `string` (cache file of a ≤ 1600 px preview) |
 | `autoPhoto(id)` | `auto_photo` | `{ id }` | `PhotoEdits` (suggested values) |
@@ -303,6 +306,7 @@ Local result types (not in api.ts): `ImportResult { imported, ids, failed[]{path
 - **Sub-components / hooks**: `usePreview(id, edits, showMask, onError)` — 80 ms after a change, one `previewPhoto` in flight, the latest edits win, returns `{url, busy}`; `Editor({photo, onChanged})`; `PhotoVideo({photos, picked, setPicked})` — timeline strip (photo blocks with order and seconds, transition length between them, ◀ ✕ ▶), seconds per photo, format, name, `LookAndSound` (photos), **Create video** (`submitJob("media.photo_video")`), progress / cancel, `Report`; first use pre-selects the top `recommendSounds(null, …)` track.
 - **Commands**: `listPhotos`, `importPhotos`, `setPhotoEdits`, `previewPhoto`, `autoPhoto`, `exportPhoto`, `removePhoto`, `recommendSounds`, `submitJob("media.photo_video")`, `cancelJob`. Imports `PRESETS`, `LookAndSound`, `Report`, `clock` from `Timeline.tsx`.
 - **Actions**: **+ Add photos** (dialog, `PHOTO_EXTENSIONS`; first imported photo selected; per-file failures shown); thumbnail grid (✎ badge when edited; ✕ on hover → inline **Remove** / **Keep**); **✦ Auto** (merges `autoPhoto` values into the sliders); **↶ Undo**; **Reset**; **Hold: original** (press and hold shows `before`); **Show sky area** (mask overlay); **Export photo** (saves edits, then `exportPhoto`; path + copy link). Sliders save 500 ms after the last change (one undo step per save); double-click a slider label resets it.
+- **AI tools** (2026-11-12, when `photoTools` says the models are installed): **👆 Click to remove** (`clicking`: each click on the preview adds `{points: [[x, y]]}` to `edits.remove`; red dots; Undo last removal / Restore all), **🖌 Remove by painting** (`brush` radius slider, SVG strokes over the preview → `edits.erase`; AI fill when `inpaint`), Face group sliders (`blemish`, `smooth`, `faceLight`), Background blur slider (`bokeh`). Page: **✦ Auto-edit unedited photos (N)** (`autoPhotos`), **Auto-edit new photos** checkbox (`localStorage` `memora.photoAutoImport`, default on, passed to `importPhotos`), moved-photos banner with **Find them in a folder…** (directory dialog → `relinkPhotos`), ⚠ badge on missing photos.
 - **Panels** (`GROUPS`): Light (exposure, contrast, highlights, shadows, whites, blacks) · Colour (temperature, tint, vibrance, saturation, look select `LOOKS`, "One colour (HSL)" with 8 `BANDS` × hue / saturation / lightness) · Sky (enhance 0–100, cool ↔ warm; note that the photo's own sky is enhanced, nothing pasted) · Detail (clarity, dehaze, sharpen 0–100 edges only, noise reduction 0–100) · Effects & frame (vignette, straighten ±15°, rotate ⟲ ⟳, crop `CROPS`).
 - **Constants**: `PHOTO_EXTENSIONS`, `GROUPS`, `LOOKS`, `BANDS`, `CROPS` — labels bilingual.
 
